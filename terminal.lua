@@ -1,10 +1,10 @@
 -- Terminal / Claude launcher
--- Cmd+?: open a Claude session
+-- Cmd+/: open a Claude session
 --   - Terminal already open → new tab
 --   - No Terminal window → new window
 --     - Laptop only → full-screen
 --     - External monitor → saved position (or default if none saved)
--- Cmd+Opt+?: save current Terminal window position (for monitor layout)
+-- Cmd+Opt+/: save current Terminal window position (for monitor layout)
 
 local CLAUDE_CMD = "claude"
 local POSITION_KEY = "terminal_monitor_frame"
@@ -68,5 +68,5 @@ local function savePosition()
     hs.alert.show("Terminal position saved")
 end
 
-hs.hotkey.bind({"cmd", "shift"}, "/", openClaude)
-hs.hotkey.bind({"cmd", "shift", "alt"}, "/", savePosition)
+hs.hotkey.bind({"cmd"}, "/", openClaude)
+hs.hotkey.bind({"cmd", "alt"}, "/", savePosition)
