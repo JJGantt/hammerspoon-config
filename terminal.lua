@@ -6,7 +6,7 @@
 --     - External monitor → saved position (or default if none saved)
 -- Cmd+Opt+/: save current Terminal window position (for monitor layout)
 
-local CLAUDE_CMD = "cd ~ && claude --dangerously-skip-permissions"
+local CLAUDE_CMD = "cd ~/workspace && claude --dangerously-skip-permissions"
 local POSITION_KEY = "terminal_monitor_frame"
 
 local function hasMonitor()
