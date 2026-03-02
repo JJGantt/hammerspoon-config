@@ -49,6 +49,24 @@ local modeChangedAt = 0        -- timestamp of last mode change
 local indicator = 0    -- how many chars of indicator are in the text field
 local lastOptUp = 0
 
+-- Screen border highlight: red=recording, amber=transcribing, nil=off
+local recordBorder = nil
+local function showBorder(color)
+    if recordBorder then recordBorder:delete() recordBorder = nil end
+    if not color then return end
+    local s = hs.screen.mainScreen():fullFrame()
+    recordBorder = hs.canvas.new(s)
+    recordBorder[1] = {
+        type         = "rectangle",
+        action       = "stroke",
+        strokeColor  = color,
+        strokeWidth  = 12,
+        frame        = {x = 0, y = 0, w = s.w, h = s.h},
+    }
+    recordBorder:level(hs.canvas.windowLevels.overlay)
+    recordBorder:show()
+end
+
 -- IMPORTANT: all hs.task/timer/watcher refs stored at module scope to prevent GC
 local soxTask = nil
 local whisperTask = nil
@@ -109,6 +127,7 @@ local function killSox()
 end
 
 local function reset()
+    showBorder(nil)
     killSox()
     if whisperTask then
         whisperTask:terminate()
@@ -142,6 +161,7 @@ local function startRecording(model)
     os.remove(WAV)
     recordingStartedAt = hs.timer.secondsSinceEpoch()
     setMode("recording")
+    showBorder({red=0.9, green=0.1, blue=0.1, alpha=0.85})
     ding("Glass")
     setIndicator(">")
     soxTask = hs.task.new(SOX, function() end,
@@ -153,6 +173,7 @@ local function stopAndTranscribe()
     log("stopAndTranscribe (sendAfter=" .. tostring(sendAfter) .. ")")
     killSox()
     setMode("transcribing")
+    showBorder({red=1, green=0.6, blue=0, alpha=0.85})
     ding("Purr")
 
     -- Focus the target window immediately so the ".." indicator (and later the
