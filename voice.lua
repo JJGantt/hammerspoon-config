@@ -302,13 +302,13 @@ local clickBlock = hs.eventtap.new({hs.eventtap.event.types.leftMouseDown}, func
 end)
 clickBlock:start()
 
--- Keep-alive + stuck state recovery (every 5s)
-local STUCK_TIMEOUT = 20  -- seconds before force-resetting a stuck state
+-- Keep-alive + stuck state recovery — self-rescheduling chain
+local STUCK_TIMEOUT = 20
 local keepAliveCount = 0
-local keepAlive = hs.timer.doEvery(5, function()
+local function keepAliveTick()
     keepAliveCount = keepAliveCount + 1
-    -- Log a heartbeat every ~60s so we can verify keepAlive is running
-    if keepAliveCount % 12 == 0 then
+    -- Heartbeat every ~30s
+    if keepAliveCount % 6 == 0 then
         log(string.format("heartbeat (mode=%s)", tostring(mode)))
     end
     if not optTap:isEnabled() then
@@ -323,7 +323,6 @@ local keepAlive = hs.timer.doEvery(5, function()
         log("WARN: clickBlock was disabled — restarting")
         clickBlock:start()
     end
-    -- Recover from any stuck state
     if mode ~= nil then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
@@ -332,7 +331,10 @@ local keepAlive = hs.timer.doEvery(5, function()
             reset()
         end
     end
-end)
+    -- Schedule next tick
+    safeTimer(5, keepAliveTick)
+end
+safeTimer(5, keepAliveTick)
 
 -- Recover after sleep/unlock
 local wakeWatcher = hs.caffeinate.watcher.new(function(event)
