@@ -54,14 +54,16 @@ local recordBorder = nil
 local function showBorder(color)
     if recordBorder then recordBorder:delete() recordBorder = nil end
     if not color then return end
-    local s = hs.screen.mainScreen():fullFrame()
-    recordBorder = hs.canvas.new(s)
+    local win = targetWin or hs.window.focusedWindow()
+    if not win then return end
+    local f = win:frame()
+    recordBorder = hs.canvas.new(f)
     recordBorder[1] = {
         type         = "rectangle",
         action       = "stroke",
         strokeColor  = color,
-        strokeWidth  = 12,
-        frame        = {x = 0, y = 0, w = s.w, h = s.h},
+        strokeWidth  = 6,
+        frame        = {x = 0, y = 0, w = f.w, h = f.h},
     }
     recordBorder:level(hs.canvas.windowLevels.overlay)
     recordBorder:show()
