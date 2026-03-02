@@ -3,13 +3,16 @@
 -- Release Option: stop + transcribe + paste in place
 -- Return (while recording): stop + transcribe + paste + send
 -- Escape: cancel
+-- Cmd+Opt+V: paste last transcription (fallback if paste failed)
 
 local SOX = "/opt/homebrew/bin/sox"
 local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
 local MODEL = os.getenv("HOME") .. "/whisper.cpp/models/ggml-base.en.bin"
 local WAV = "/tmp/hs-voice.wav"
+local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
 
+local lastTranscription = nil  -- most recent successful transcription
 local mode = nil       -- nil | "recording" | "transcribing"
 local indicator = 0    -- how many chars of indicator are in the text field
 local lastOptUp = 0
@@ -18,6 +21,7 @@ local lastOptUp = 0
 local soxTask = nil
 local whisperTask = nil
 local sendAfter = false  -- true = press Enter after pasting
+local targetWin = nil    -- window focused when recording started
 
 -- Type into the focused text field, replacing any existing indicator
 local function setIndicator(str)
@@ -48,6 +52,7 @@ local function reset()
     end
     hs.execute("pkill -9 -f 'whisper-cli.*hs-voice' 2>/dev/null", true)
     setIndicator(nil)
+    targetWin = nil
     mode = nil
 end
 
@@ -58,9 +63,10 @@ end
 
 local function startRecording()
     reset()
+    targetWin = hs.window.focusedWindow()
     os.remove(WAV)
     mode = "recording"
-    ding("Tink")
+    ding("Glass")
     setIndicator(">")
     soxTask = hs.task.new(SOX, function() end,
         {"-d", "-r", "16000", "-c", "1", "-b", "16", WAV})
@@ -70,10 +76,14 @@ end
 local function stopAndTranscribe()
     killSox()
     mode = "transcribing"
-    ding("Pop")
-    setIndicator("..")
+    ding("Purr")
 
-    hs.timer.doAfter(0.15, function()
+    -- Focus the target window immediately so the ".." indicator (and later the
+    -- paste) all happen in the right place, not wherever the user happened to be.
+    local function proceed()
+        setIndicator("..")
+
+        hs.timer.doAfter(0.15, function()
         local f = io.open(WAV, "r")
         if not f then
             setIndicator(nil)
@@ -109,9 +119,16 @@ local function stopAndTranscribe()
                 return
             end
 
+            -- Save transcription so it's never lost
+            lastTranscription = text
+            local f = io.open(LAST_TXT, "w")
+            if f then f:write(text) f:close() end
+
             setIndicator(nil)
             local prev = hs.pasteboard.getContents()
             hs.pasteboard.setContents(text)
+
+            -- targetWin already focused at the start of stopAndTranscribe
             hs.timer.doAfter(0.05, function()
                 hs.eventtap.keyStroke({"cmd"}, "v")
                 if sendAfter then
@@ -122,6 +139,7 @@ local function stopAndTranscribe()
                     end)
                 else
                     hs.timer.doAfter(0.05, function()
+                        hs.eventtap.keyStrokes(" ")
                         if prev then hs.pasteboard.setContents(prev) end
                         mode = nil
                     end)
@@ -130,6 +148,14 @@ local function stopAndTranscribe()
         end, {"-m", MODEL, "-f", WAV, "--no-prints", "-nt"})
         whisperTask:start()
     end)
+    end -- proceed()
+
+    if targetWin then
+        targetWin:focus()
+        hs.timer.doAfter(0.15, proceed)
+    else
+        proceed()
+    end
 end
 
 -- Option key watcher
@@ -170,10 +196,14 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         hs.alert.show("Cancelled")
         return true
     end
-    if kc == 36 and mode == "recording" then
-        sendAfter = true
-        stopAndTranscribe()
-        return true
+    if kc == 36 then
+        if mode == "recording" then
+            sendAfter = true
+            stopAndTranscribe()
+            return true
+        elseif mode == "transcribing" then
+            return true  -- swallow key repeat / held Enter during transcription
+        end
     end
     return false
 end)
@@ -200,3 +230,23 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
     end
 end)
 wakeWatcher:start()
+
+-- Cmd+Opt+V: paste last transcription (fallback if normal paste failed)
+hs.hotkey.bind({"cmd", "alt"}, "v", function()
+    -- Try in-memory first, fall back to file
+    local text = lastTranscription
+    if not text then
+        local f = io.open(LAST_TXT, "r")
+        if f then text = f:read("*a") f:close() end
+    end
+    if not text or text == "" then
+        hs.alert.show("No transcription saved")
+        return
+    end
+    local prev = hs.pasteboard.getContents()
+    hs.pasteboard.setContents(text)
+    hs.eventtap.keyStroke({"cmd"}, "v")
+    hs.timer.doAfter(0.3, function()
+        if prev then hs.pasteboard.setContents(prev) end
+    end)
+end)
