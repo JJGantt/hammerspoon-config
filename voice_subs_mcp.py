@@ -4,9 +4,9 @@ MCP server for managing voice transcription substitutions.
 
 TOOLS
 =====
-- list_subs()                  — Show all current substitutions
-- add_sub(pattern, replacement) — Add a new substitution
-- remove_sub(pattern)          — Remove a substitution by pattern
+- list_subs()                 — Show all current substitutions
+- add_sub(word, replacement)  — Add a case-insensitive substitution (plain text input)
+- remove_sub(word)            — Remove a substitution by plain word
 """
 
 import json
@@ -19,6 +19,26 @@ import mcp.types as types
 SUBS_FILE = Path.home() / "pi-data" / "voice_subs.json"
 
 server = Server("voice-subs")
+
+# Lua pattern magic characters that need escaping
+_LUA_MAGIC = set(r"()%.+*?[]^$-")
+
+
+def _to_lua_ci_pattern(word: str) -> str:
+    """Convert a plain word/phrase to a case-insensitive Lua pattern.
+
+    'jit'     → '[Jj][Ii][Tt]'
+    'git hub' → '[Gg][Ii][Tt] [Hh][Uu][Bb]'
+    """
+    result = []
+    for ch in word:
+        if ch.isalpha():
+            result.append(f"[{ch.upper()}{ch.lower()}]")
+        elif ch in _LUA_MAGIC:
+            result.append("%" + ch)
+        else:
+            result.append(ch)
+    return "".join(result)
 
 
 def _load() -> list:
@@ -42,25 +62,29 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="add_sub",
-            description="Add a voice transcription substitution. Pattern is a Lua regex (or plain text — use plain text unless you need regex). Example: add_sub('Jithub', 'GitHub')",
+            description=(
+                "Add a case-insensitive voice transcription substitution. "
+                "Pass plain text — the Lua pattern is generated automatically. "
+                "Example: add_sub('jit', 'git') or add_sub('jithub', 'GitHub')"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "pattern":     {"type": "string", "description": "Text or Lua regex to match"},
+                    "word":        {"type": "string", "description": "Plain text word/phrase to match (case-insensitive)"},
                     "replacement": {"type": "string", "description": "What to replace it with"},
                 },
-                "required": ["pattern", "replacement"],
+                "required": ["word", "replacement"],
             },
         ),
         types.Tool(
             name="remove_sub",
-            description="Remove a substitution by its pattern",
+            description="Remove a substitution by its plain word (same value passed to add_sub)",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "The pattern to remove"},
+                    "word": {"type": "string", "description": "The plain word to remove"},
                 },
-                "required": ["pattern"],
+                "required": ["word"],
             },
         ),
     ]
@@ -75,32 +99,33 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         subs = _load()
         if not subs:
             return text("No substitutions defined.")
-        lines = [f"  {s['pattern']!r} → {s['replacement']!r}" for s in subs]
+        lines = [f"  {s.get('word', s['pattern'])!r} → {s['replacement']!r}" for s in subs]
         return text("Substitutions:\n" + "\n".join(lines))
 
     elif name == "add_sub":
-        pattern = arguments["pattern"]
+        word = arguments["word"].lower()
         replacement = arguments["replacement"]
+        pattern = _to_lua_ci_pattern(word)
         subs = _load()
-        # Update if pattern already exists, otherwise append
         for s in subs:
-            if s["pattern"] == pattern:
+            if s.get("word") == word:
                 s["replacement"] = replacement
+                s["pattern"] = pattern
                 _save(subs)
-                return text(f"Updated: {pattern!r} → {replacement!r}")
-        subs.append({"pattern": pattern, "replacement": replacement})
+                return text(f"Updated: {word!r} → {replacement!r}")
+        subs.append({"word": word, "pattern": pattern, "replacement": replacement})
         _save(subs)
-        return text(f"Added: {pattern!r} → {replacement!r}")
+        return text(f"Added: {word!r} → {replacement!r}  (pattern: {pattern})")
 
     elif name == "remove_sub":
-        pattern = arguments["pattern"]
+        word = arguments["word"].lower()
         subs = _load()
         before = len(subs)
-        subs = [s for s in subs if s["pattern"] != pattern]
+        subs = [s for s in subs if s.get("word") != word]
         if len(subs) == before:
-            return text(f"No substitution found with pattern {pattern!r}")
+            return text(f"No substitution found for {word!r}")
         _save(subs)
-        return text(f"Removed: {pattern!r}")
+        return text(f"Removed: {word!r}")
 
     return text(f"Unknown tool: {name}")
 
