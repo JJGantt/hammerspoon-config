@@ -16,6 +16,20 @@ local WAV = "/tmp/hs-voice.wav"
 local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
 
+-- Post-transcription substitutions — add any misrecognized words here
+local SUBS = {
+    {"[Jj]ithub",        "GitHub"},
+    {"[Gg]it [Hh]ub",    "GitHub"},
+    {"[Gg]et [Hh]ub",    "GitHub"},
+    {"[Gg]ithup",        "GitHub"},
+}
+local function applySubs(text)
+    for _, s in ipairs(SUBS) do
+        text = text:gsub(s[1], s[2])
+    end
+    return text
+end
+
 local LOG_FILE = os.getenv("HOME") .. "/Library/Logs/hs-voice.log"
 local hslog = hs.logger.new("voice", "info")
 
@@ -175,6 +189,7 @@ local function stopAndTranscribe()
                         end
                     end
                     text = text:gsub("%[.-%]", ""):gsub("%(.-%)", ""):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+                    text = applySubs(text)
 
                     if text == "" then
                         setIndicator(nil)
