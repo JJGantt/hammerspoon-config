@@ -191,14 +191,19 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     local optDown = flags.alt == true
     if optDown then return false end
 
+    -- Option was released
     if mode == "recording" then
+        log("opt-release: stopping recording")
         sendAfter = false
         stopAndTranscribe()
         lastOptUp = 0
         return false
     end
 
-    if mode ~= nil then return false end
+    if mode ~= nil then
+        log("opt-release: ignored (mode=" .. tostring(mode) .. ")")
+        return false
+    end
 
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
@@ -215,12 +220,14 @@ optTap:start()
 local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
     local kc = event:getKeyCode()
     if kc == 53 and mode ~= nil then
+        log("escape: cancelling (mode=" .. tostring(mode) .. ")")
         reset()
         hs.alert.show("Cancelled")
         return true
     end
     if kc == 36 then
         if mode == "recording" then
+            log("enter: stopping recording to send")
             sendAfter = true
             stopAndTranscribe()
             return true
