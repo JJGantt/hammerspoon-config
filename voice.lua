@@ -100,6 +100,7 @@ local function setMode(newMode)
     log(string.format("mode: %s -> %s", tostring(mode), tostring(newMode)))
     mode = newMode
     modeChangedAt = hs.timer.secondsSinceEpoch()
+    if newMode == nil then showBorder(nil) end
 end
 
 -- Type into the focused text field, replacing any existing indicator
@@ -129,7 +130,6 @@ local function killSox()
 end
 
 local function reset()
-    showBorder(nil)
     killSox()
     if whisperTask then
         whisperTask:terminate()
