@@ -323,7 +323,7 @@ local function keepAliveTick()
         log("WARN: clickBlock was disabled — restarting")
         clickBlock:start()
     end
-    if mode ~= nil then
+    if mode == "transcribing" then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
             log(string.format("WARN: stuck in '%s' for %.0fs — force resetting", mode, elapsed))
