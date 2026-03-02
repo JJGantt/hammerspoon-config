@@ -114,6 +114,9 @@ local function ding(name)
     if s then s:play() end
 end
 
+local recordingStartedAt = 0
+local MIN_RECORD_SECS = 0.5  -- ignore Option release this soon after starting
+
 local function startRecording(model)
     currentModel = model or MODEL_BASE
     local modelName = currentModel:match("ggml%-(.-)%.bin") or "?"
@@ -121,6 +124,7 @@ local function startRecording(model)
     reset()
     targetWin = hs.window.focusedWindow()
     os.remove(WAV)
+    recordingStartedAt = hs.timer.secondsSinceEpoch()
     setMode("recording")
     ding("Glass")
     setIndicator(">")
@@ -253,6 +257,11 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
 
     -- Option was released — defer all work
     if mode == "recording" then
+        local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
+        if elapsed < MIN_RECORD_SECS then
+            -- Too soon after starting (e.g. Opt+key release) — ignore
+            return false
+        end
         safeTimer(0, function()
             log("opt-release: stopping recording")
             sendAfter = false
