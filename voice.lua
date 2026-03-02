@@ -12,7 +12,16 @@ local WAV = "/tmp/hs-voice.wav"
 local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
 
-local log = hs.logger.new("voice", "info")
+local LOG_FILE = os.getenv("HOME") .. "/Library/Logs/hs-voice.log"
+local hslog = hs.logger.new("voice", "info")
+
+local function log(msg)
+    local ts = os.date("%Y-%m-%d %H:%M:%S")
+    local line = ts .. "  " .. msg
+    hslog.i(line)
+    local f = io.open(LOG_FILE, "a")
+    if f then f:write(line .. "\n") f:close() end
+end
 
 local lastTranscription = nil  -- most recent successful transcription
 local mode = nil       -- nil | "recording" | "transcribing"
@@ -27,7 +36,7 @@ local sendAfter = false  -- true = press Enter after pasting
 local targetWin = nil    -- window focused when recording started
 
 local function setMode(newMode)
-    log.f("mode: %s -> %s", tostring(mode), tostring(newMode))
+    log(string.format("mode: %s -> %s", tostring(mode), tostring(newMode)))
     mode = newMode
     modeChangedAt = hs.timer.secondsSinceEpoch()
 end
@@ -71,6 +80,7 @@ local function ding(name)
 end
 
 local function startRecording()
+    log("startRecording")
     reset()
     targetWin = hs.window.focusedWindow()
     os.remove(WAV)
@@ -83,6 +93,7 @@ local function startRecording()
 end
 
 local function stopAndTranscribe()
+    log("stopAndTranscribe (sendAfter=" .. tostring(sendAfter) .. ")")
     killSox()
     setMode("transcribing")
     ding("Purr")
@@ -105,7 +116,7 @@ local function stopAndTranscribe()
         whisperTask = hs.task.new(WHISPER, function(code, stdout, stderr)
             whisperTask = nil
             if code ~= 0 then
-                log.w("whisper exited with code " .. tostring(code))
+                log("WARN: whisper exited with code " .. tostring(code))
                 setIndicator(nil)
                 setMode(nil)
                 hs.alert.show("Transcription failed")
@@ -129,7 +140,7 @@ local function stopAndTranscribe()
                 return
             end
 
-            log.f("transcribed: %s", text:sub(1, 80))
+            log("transcribed: " .. text:sub(1, 80))
 
             -- Save transcription so it's never lost
             lastTranscription = text
@@ -225,18 +236,18 @@ keyTap:start()
 local STUCK_TIMEOUT = 45  -- seconds before force-resetting a stuck state
 local keepAlive = hs.timer.doEvery(5, function()
     if not optTap:isEnabled() then
-        log.w("optTap was disabled — restarting")
+        log("WARN: optTap was disabled — restarting")
         optTap:start()
     end
     if not keyTap:isEnabled() then
-        log.w("keyTap was disabled — restarting")
+        log("WARN: keyTap was disabled — restarting")
         keyTap:start()
     end
     -- Recover from any stuck state
     if mode ~= nil then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
-            log.wf("stuck in '%s' for %.0fs — force resetting", mode, elapsed)
+            log(string.format("WARN: stuck in '%s' for %.0fs — force resetting", mode, elapsed))
             hs.alert.show("Voice: recovered from stuck state")
             reset()
         end
