@@ -7,7 +7,10 @@
 
 local SOX = "/opt/homebrew/bin/sox"
 local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
-local MODEL = os.getenv("HOME") .. "/whisper.cpp/models/ggml-base.en.bin"
+local MODEL_BASE   = os.getenv("HOME") .. "/whisper.cpp/models/ggml-base.en.bin"
+local MODEL_SMALL  = os.getenv("HOME") .. "/whisper.cpp/models/ggml-small.en.bin"
+local MODEL_MEDIUM = os.getenv("HOME") .. "/whisper.cpp/models/ggml-medium.en.bin"
+local MODEL = MODEL_BASE  -- default
 local WAV = "/tmp/hs-voice.wav"
 local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
@@ -34,8 +37,9 @@ local soxTask = nil
 local whisperTask = nil
 local whisperTimeout = nil  -- timer: kills whisper if it hangs
 local activeTimers = {}     -- holds refs to all doAfter timers to prevent GC
-local sendAfter = false  -- true = press Enter after pasting
-local targetWin = nil    -- window focused when recording started
+local sendAfter = false     -- true = press Enter after pasting
+local targetWin = nil       -- window focused when recording started
+local currentModel = MODEL  -- model to use for current recording
 
 -- Schedule a timer and keep a strong reference so GC can't collect it
 local function safeTimer(delay, fn)
@@ -109,8 +113,10 @@ local function ding(name)
     if s then s:play() end
 end
 
-local function startRecording()
-    log("startRecording")
+local function startRecording(model)
+    currentModel = model or MODEL_BASE
+    local modelName = currentModel:match("ggml%-(.-)%.bin") or "?"
+    log("startRecording model=" .. modelName)
     reset()
     targetWin = hs.window.focusedWindow()
     os.remove(WAV)
@@ -207,7 +213,7 @@ local function stopAndTranscribe()
                     setMode(nil)
                     hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
                 end
-            end, {"-m", MODEL, "-f", WAV, "--no-prints", "-nt"})
+            end, {"-m", currentModel, "-f", WAV, "--no-prints", "-nt"})
             whisperTask:start()
 
             -- Whisper timeout — stored at module scope so GC can't collect it
@@ -260,7 +266,7 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
         lastOptUp = 0
-        safeTimer(0, startRecording)
+        safeTimer(0, function() startRecording(MODEL_BASE) end)
     else
         lastOptUp = now
     end
@@ -268,9 +274,11 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
 end)
 optTap:start()
 
--- Escape to cancel, Return to send — callback returns IMMEDIATELY
+-- Escape to cancel, Return to send, Opt+/'" to start with specific model
 local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
     local kc = event:getKeyCode()
+    local flags = event:getFlags()
+
     if kc == 53 and mode ~= nil then
         safeTimer(0, function()
             log("escape: cancelling (mode=" .. tostring(mode) .. ")")
@@ -291,6 +299,20 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
             return true
         end
     end
+
+    -- Opt+/ = base, Opt+' = small, Opt+] = medium
+    if flags.alt and not flags.cmd and not flags.shift and not flags.ctrl and mode == nil then
+        local m = nil
+        if     kc == 44 then m = MODEL_BASE
+        elseif kc == 39 then m = MODEL_SMALL
+        elseif kc == 30 then m = MODEL_MEDIUM
+        end
+        if m then
+            safeTimer(0, function() startRecording(m) end)
+            return true
+        end
+    end
+
     return false
 end)
 keyTap:start()
