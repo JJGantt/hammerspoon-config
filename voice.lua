@@ -16,16 +16,18 @@ local WAV = "/tmp/hs-voice.wav"
 local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
 
--- Post-transcription substitutions — add any misrecognized words here
-local SUBS = {
-    {"[Jj]ithub",        "GitHub"},
-    {"[Gg]it [Hh]ub",    "GitHub"},
-    {"[Gg]et [Hh]ub",    "GitHub"},
-    {"[Gg]ithup",        "GitHub"},
-}
+-- Post-transcription substitutions — managed via voice-subs MCP tool
+local SUBS_FILE = os.getenv("HOME") .. "/pi-data/voice_subs.json"
 local function applySubs(text)
-    for _, s in ipairs(SUBS) do
-        text = text:gsub(s[1], s[2])
+    local f = io.open(SUBS_FILE, "r")
+    if not f then return text end
+    local ok, data = pcall(function()
+        return hs.json.decode(f:read("*a"))
+    end)
+    f:close()
+    if not ok or not data or not data.subs then return text end
+    for _, s in ipairs(data.subs) do
+        text = text:gsub(s.pattern, s.replacement)
     end
     return text
 end
