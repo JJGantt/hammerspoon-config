@@ -10,7 +10,8 @@ local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
 local MODEL_BASE   = os.getenv("HOME") .. "/whisper.cpp/models/ggml-base.en.bin"
 local MODEL_SMALL  = os.getenv("HOME") .. "/whisper.cpp/models/ggml-small.en.bin"
 local MODEL_MEDIUM = os.getenv("HOME") .. "/whisper.cpp/models/ggml-medium.en.bin"
-local MODEL = MODEL_BASE  -- default
+local MODEL_TURBO  = os.getenv("HOME") .. "/whisper.cpp/models/ggml-large-v3-turbo.bin"
+local MODEL = MODEL_BASE  -- default (double-tap Option)
 local WAV = "/tmp/hs-voice.wav"
 local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
@@ -300,12 +301,12 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
-    -- Opt+/ = base, Opt+' = small, Opt+] = medium
+    -- Opt+/ = small, Opt+' = medium, Opt+] = large-v3-turbo
     if flags.alt and not flags.cmd and not flags.shift and not flags.ctrl and mode == nil then
         local m = nil
-        if     kc == 44 then m = MODEL_BASE
-        elseif kc == 39 then m = MODEL_SMALL
-        elseif kc == 30 then m = MODEL_MEDIUM
+        if     kc == 44 then m = MODEL_SMALL
+        elseif kc == 39 then m = MODEL_MEDIUM
+        elseif kc == 30 then m = MODEL_TURBO
         end
         if m then
             safeTimer(0, function() startRecording(m) end)
