@@ -74,12 +74,17 @@ local function setIndicator(str)
     end
 end
 
+-- Async pkill — never blocks the calling thread
+local function asyncPkill(pattern)
+    hs.task.new("/usr/bin/pkill", nil, {"-9", "-f", pattern}):start()
+end
+
 local function killSox()
     if soxTask then
         soxTask:terminate()
         soxTask = nil
     end
-    hs.execute("pkill -9 -f 'sox.*hs-voice' 2>/dev/null", true)
+    asyncPkill("sox.*hs-voice")
 end
 
 local function reset()
@@ -92,7 +97,7 @@ local function reset()
         whisperTimeout:stop()
         whisperTimeout = nil
     end
-    hs.execute("pkill -9 -f 'whisper-cli.*hs-voice' 2>/dev/null", true)
+    asyncPkill("whisper-cli.*hs-voice")
     setIndicator(nil)
     targetWin = nil
     cleanTimers()
@@ -211,7 +216,7 @@ local function stopAndTranscribe()
                     log("WARN: whisper timed out after 15s — killing")
                     whisperTask:terminate()
                     whisperTask = nil
-                    hs.execute("pkill -9 -f 'whisper-cli.*hs-voice' 2>/dev/null", true)
+                    asyncPkill("whisper-cli.*hs-voice")
                     setIndicator(nil)
                     setMode(nil)
                     hs.alert.show("Transcription timed out")
@@ -229,7 +234,7 @@ local function stopAndTranscribe()
     end
 end
 
--- Option key watcher
+-- Option key watcher — callback returns IMMEDIATELY, defers all work
 local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
     local flags = event:getFlags()
     local kc = event:getKeyCode()
@@ -239,24 +244,23 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     local optDown = flags.alt == true
     if optDown then return false end
 
-    -- Option was released
+    -- Option was released — defer all work
     if mode == "recording" then
-        log("opt-release: stopping recording")
-        sendAfter = false
-        stopAndTranscribe()
+        safeTimer(0, function()
+            log("opt-release: stopping recording")
+            sendAfter = false
+            stopAndTranscribe()
+        end)
         lastOptUp = 0
         return false
     end
 
-    if mode ~= nil then
-        log("opt-release: ignored (mode=" .. tostring(mode) .. ")")
-        return false
-    end
+    if mode ~= nil then return false end
 
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
         lastOptUp = 0
-        startRecording()
+        safeTimer(0, startRecording)
     else
         lastOptUp = now
     end
@@ -264,28 +268,39 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
 end)
 optTap:start()
 
--- Escape to cancel, Return to send
+-- Escape to cancel, Return to send — callback returns IMMEDIATELY
 local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
     local kc = event:getKeyCode()
     if kc == 53 and mode ~= nil then
-        log("escape: cancelling (mode=" .. tostring(mode) .. ")")
-        reset()
-        hs.alert.show("Cancelled")
+        safeTimer(0, function()
+            log("escape: cancelling (mode=" .. tostring(mode) .. ")")
+            reset()
+            hs.alert.show("Cancelled")
+        end)
         return true
     end
     if kc == 36 then
         if mode == "recording" then
-            log("enter: stopping recording to send")
-            sendAfter = true
-            stopAndTranscribe()
+            safeTimer(0, function()
+                log("enter: stopping recording to send")
+                sendAfter = true
+                stopAndTranscribe()
+            end)
             return true
         elseif mode == "transcribing" then
-            return true  -- swallow key repeat / held Enter during transcription
+            return true
         end
     end
     return false
 end)
 keyTap:start()
+
+-- Block mouse clicks during transcription so window focus can't change
+local clickBlock = hs.eventtap.new({hs.eventtap.event.types.leftMouseDown}, function()
+    if mode == "transcribing" then return true end
+    return false
+end)
+clickBlock:start()
 
 -- Keep-alive + stuck state recovery (every 5s)
 local STUCK_TIMEOUT = 20  -- seconds before force-resetting a stuck state
@@ -303,6 +318,10 @@ local keepAlive = hs.timer.doEvery(5, function()
     if not keyTap:isEnabled() then
         log("WARN: keyTap was disabled — restarting")
         keyTap:start()
+    end
+    if not clickBlock:isEnabled() then
+        log("WARN: clickBlock was disabled — restarting")
+        clickBlock:start()
     end
     -- Recover from any stuck state
     if mode ~= nil then
