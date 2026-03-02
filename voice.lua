@@ -114,62 +114,83 @@ local function stopAndTranscribe()
         f:close()
 
         whisperTask = hs.task.new(WHISPER, function(code, stdout, stderr)
-            whisperTask = nil
-            if code ~= 0 then
-                log("WARN: whisper exited with code " .. tostring(code))
-                setIndicator(nil)
-                setMode(nil)
-                hs.alert.show("Transcription failed")
-                return
-            end
-
-            local text = ""
-            for line in stdout:gmatch("[^\r\n]+") do
-                local c = line:match("%]%s*(.+)") or line
-                if c:match("%S") then
-                    if text ~= "" then text = text .. " " end
-                    text = text .. c:match("^%s*(.-)%s*$")
+            local ok, err = pcall(function()
+                whisperTask = nil
+                if code ~= 0 then
+                    log("WARN: whisper exited with code " .. tostring(code))
+                    setIndicator(nil)
+                    setMode(nil)
+                    hs.alert.show("Transcription failed")
+                    return
                 end
-            end
-            text = text:gsub("%[.-%]", ""):gsub("%(.-%)", ""):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
 
-            if text == "" then
-                setIndicator(nil)
-                setMode(nil)
-                hs.alert.show("No speech detected")
-                return
-            end
-
-            log("transcribed: " .. text:sub(1, 80))
-
-            -- Save transcription so it's never lost
-            lastTranscription = text
-            local f = io.open(LAST_TXT, "w")
-            if f then f:write(text) f:close() end
-
-            setIndicator(nil)
-            local prev = hs.pasteboard.getContents()
-            hs.pasteboard.setContents(text)
-
-            -- targetWin already focused at the start of stopAndTranscribe
-            hs.timer.doAfter(0.05, function()
-                hs.eventtap.keyStroke({"cmd"}, "v")
-                if sendAfter then
-                    hs.timer.doAfter(0.15, function()
-                        hs.eventtap.keyStroke({}, "return")
-                        if prev then hs.pasteboard.setContents(prev) end
-                        setMode(nil)
-                    end)
-                else
-                    hs.timer.doAfter(0.05, function()
-                        hs.eventtap.keyStrokes(" ")
-                        if prev then hs.pasteboard.setContents(prev) end
-                        setMode(nil)
-                    end)
+                local text = ""
+                for line in stdout:gmatch("[^\r\n]+") do
+                    local c = line:match("%]%s*(.+)") or line
+                    if c:match("%S") then
+                        if text ~= "" then text = text .. " " end
+                        text = text .. c:match("^%s*(.-)%s*$")
+                    end
                 end
+                text = text:gsub("%[.-%]", ""):gsub("%(.-%)", ""):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+
+                if text == "" then
+                    setIndicator(nil)
+                    setMode(nil)
+                    hs.alert.show("No speech detected")
+                    return
+                end
+
+                log("transcribed: " .. text:sub(1, 80))
+
+                -- Save transcription so it's never lost
+                lastTranscription = text
+                local lf = io.open(LAST_TXT, "w")
+                if lf then lf:write(text) lf:close() end
+
+                setIndicator(nil)
+                local prev = hs.pasteboard.getContents()
+                hs.pasteboard.setContents(text)
+
+                -- targetWin already focused at the start of stopAndTranscribe
+                hs.timer.doAfter(0.05, function()
+                    hs.eventtap.keyStroke({"cmd"}, "v")
+                    if sendAfter then
+                        hs.timer.doAfter(0.15, function()
+                            hs.eventtap.keyStroke({}, "return")
+                            if prev then hs.pasteboard.setContents(prev) end
+                            setMode(nil)
+                        end)
+                    else
+                        hs.timer.doAfter(0.05, function()
+                            hs.eventtap.keyStrokes(" ")
+                            if prev then hs.pasteboard.setContents(prev) end
+                            setMode(nil)
+                        end)
+                    end
+                end)
             end)
+            if not ok then
+                log("ERROR in whisper callback: " .. tostring(err))
+                setIndicator(nil)
+                setMode(nil)
+                hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
+            end
         end, {"-m", MODEL, "-f", WAV, "--no-prints", "-nt"})
         whisperTask:start()
+
+        -- Whisper timeout: if it hasn't finished in 15s, kill it
+        hs.timer.doAfter(15, function()
+            if whisperTask then
+                log("WARN: whisper timed out after 15s — killing")
+                whisperTask:terminate()
+                whisperTask = nil
+                hs.execute("pkill -9 -f 'whisper-cli.*hs-voice' 2>/dev/null", true)
+                setIndicator(nil)
+                setMode(nil)
+                hs.alert.show("Transcription timed out")
+            end
+        end)
     end)
     end -- proceed()
 
