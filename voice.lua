@@ -55,7 +55,6 @@ local mode = nil       -- nil | "recording" | "transcribing"
 local modeChangedAt = 0        -- timestamp of last mode change
 local indicator = 0    -- how many chars of indicator are in the text field
 local lastOptUp = 0
-local capslockMode = false     -- true when Caps Lock is on
 
 local function modelLabel(m)
     if     m == MODEL_BASE   then return "Base"
@@ -412,17 +411,6 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
 end)
 keyTap:start()
 
--- Caps Lock state watcher
-local capslockWatcher = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
-    local state = event:getFlags().capslock == true
-    if state ~= capslockMode then
-        capslockMode = state
-        log("capslock mode: " .. tostring(capslockMode))
-    end
-    return false
-end)
-capslockWatcher:start()
-
 -- Block mouse clicks during transcription so window focus can't change
 local clickBlock = hs.eventtap.new({hs.eventtap.event.types.leftMouseDown}, function()
     if mode == "transcribing" then return true end
@@ -451,10 +439,7 @@ local function keepAliveTick()
         log("WARN: clickBlock was disabled — restarting")
         clickBlock:start()
     end
-    if not capslockWatcher:isEnabled() then
-        log("WARN: capslockWatcher was disabled — restarting")
-        capslockWatcher:start()
-    end
+
     if mode == "transcribing" then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
@@ -475,7 +460,6 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
         hs.timer.doAfter(1, function()
             if not optTap:isEnabled() then optTap:start() end
             if not keyTap:isEnabled() then keyTap:start() end
-            if not capslockWatcher:isEnabled() then capslockWatcher:start() end
             reset()
         end)
     end
