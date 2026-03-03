@@ -455,6 +455,7 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
             if not keyTap:isEnabled()      then keyTap:start()      end
             if not capslockTap:isEnabled() then capslockTap:start() end
             capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true
+            log("wake: capslockOn = " .. tostring(capslockOn))
             reset()
         end)
     end
