@@ -311,7 +311,7 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     local optDown = flags.alt == true
     if optDown then
         -- Caps Lock mode: Option down = switch to base
-        if capslockMode and mode == nil then
+        if hs.eventtap.checkKeyboardModifiers().capslock and mode == nil then
             currentModel = MODEL_BASE
             hs.alert.show("Model: Base", 1)
             return true
@@ -338,7 +338,7 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     if mode ~= nil then return false end
 
     -- Caps Lock mode: don't use Option release to trigger recording
-    if capslockMode then return false end
+    if hs.eventtap.checkKeyboardModifiers().capslock then return false end
 
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
@@ -356,7 +356,7 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
     local flags = event:getFlags()
 
     -- Caps Lock mode: single-key actions (only when idle)
-    if capslockMode and mode == nil then
+    if hs.eventtap.checkKeyboardModifiers().capslock and mode == nil then
         if kc == 49 then  -- Space = start recording
             safeTimer(0, function() startRecording(currentModel) end)
             return true
