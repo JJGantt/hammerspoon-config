@@ -55,6 +55,7 @@ local mode = nil       -- nil | "recording" | "transcribing"
 local modeChangedAt = 0        -- timestamp of last mode change
 local indicator = 0    -- how many chars of indicator are in the text field
 local lastOptUp = 0
+local capslockOn = false  -- tracked proactively; don't rely on per-event flags
 
 local function modelLabel(m)
     if     m == MODEL_BASE   then return "Base"
@@ -300,6 +301,13 @@ local function stopAndTranscribe()
     end
 end
 
+-- Track Caps Lock state proactively so it's always current when Space is pressed
+local capslockTracker = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
+    capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true
+    return false
+end)
+capslockTracker:start()
+
 -- Option key watcher — callback returns IMMEDIATELY, defers all work
 local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
     local flags = event:getFlags()
@@ -310,7 +318,7 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     local optDown = flags.alt == true
     if optDown then
         -- Caps Lock mode: Option down = switch to base
-        if hs.eventtap.checkKeyboardModifiers().capslock and mode == nil then
+        if capslockOn and mode == nil then
             currentModel = MODEL_BASE
             hs.alert.show("Model: Base", 1)
             return true
@@ -337,7 +345,7 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     if mode ~= nil then return false end
 
     -- Caps Lock mode: don't use Option release to trigger recording
-    if hs.eventtap.checkKeyboardModifiers().capslock then return false end  -- don't double-tap in caps lock mode
+    if capslockOn then return false end  -- don't double-tap in caps lock mode
 
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
@@ -355,7 +363,7 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
     local flags = event:getFlags()
 
     -- Caps Lock mode: single-key actions (only when idle)
-    if flags.capslock and mode == nil then
+    if capslockOn and mode == nil then
         if kc == 49 then  -- Space = start recording
             safeTimer(0, function() startRecording(currentModel) end)
             return true
@@ -382,7 +390,7 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
     end
 
     -- Caps Lock mode: Space stops recording (Cmd+Space = paste only, Space = send)
-    if kc == 49 and mode == "recording" and flags.capslock then
+    if kc == 49 and mode == "recording" and capslockOn then
         safeTimer(0, function()
             log("capslock space: stopping recording (send=" .. tostring(not flags.cmd) .. ")")
             sendAfter = not flags.cmd
