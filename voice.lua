@@ -344,7 +344,7 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
 
     -- Caps Lock mode
     if capslockOn then
-        if kc == 49 then  -- Space
+        if kc == 49 and event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then  -- Space, no repeat
             log("capslock space (mode=" .. tostring(mode) .. ")")
             if mode == nil then
                 safeTimer(0, function() startRecording(currentModel) end)
