@@ -56,7 +56,7 @@ local mode = nil       -- nil | "recording" | "transcribing"
 local modeChangedAt = 0
 local indicator = 0
 local lastOptUp = 0
-local capslockOn = false  -- toggled by counting Caps Lock keypresses (keycode 57)
+local capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true  -- init from hardware
 
 local function modelLabel(m)
     if     m == MODEL_BASE   then return "Base"
@@ -447,7 +447,7 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
             if not optTap:isEnabled()      then optTap:start()      end
             if not keyTap:isEnabled()      then keyTap:start()      end
             if not capslockTap:isEnabled() then capslockTap:start() end
-            capslockOn = false
+            capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true
             reset()
         end)
     end
