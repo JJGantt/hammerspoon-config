@@ -386,18 +386,6 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
                 return true
             end
         end
-        if mode == nil then
-            local m, label = nil, nil
-            if     kc == 44 then m, label = MODEL_SMALL,  "Small"
-            elseif kc == 39 then m, label = MODEL_MEDIUM, "Medium"
-            elseif kc == 30 then m, label = MODEL_TURBO,  "Turbo"
-            end
-            if m then
-                currentModel = m
-                hs.alert.show("Model: " .. label, 1)
-                return true
-            end
-        end
     end
 
     -- Escape cancels
