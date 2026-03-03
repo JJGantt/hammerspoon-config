@@ -350,6 +350,8 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
                 safeTimer(0, function() startRecording(currentModel) end)
                 return true
             elseif mode == "recording" then
+                local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
+                if elapsed < MIN_RECORD_SECS then return true end  -- too soon, swallow it
                 safeTimer(0, function()
                     sendAfter = not flags.cmd
                     stopAndTranscribe()
