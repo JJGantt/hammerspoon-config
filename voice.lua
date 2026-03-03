@@ -412,7 +412,7 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
-    -- Opt+/ ' ] = switch model
+    -- Opt+/ ' ] = switch model and start recording (release Opt to stop)
     if flags.alt and not flags.cmd and not flags.shift and not flags.ctrl and mode == nil then
         local m, label = nil, nil
         if     kc == 44 then m, label = MODEL_SMALL,  "Small"
@@ -420,8 +420,8 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         elseif kc == 30 then m, label = MODEL_TURBO,  "Turbo"
         end
         if m then
-            currentModel = m
-            hs.alert.show("Model: " .. label, 1)
+            lastOptUp = 0  -- prevent Option release from double-tap triggering
+            safeTimer(0, function() startRecording(m) end)
             return true
         end
     end
