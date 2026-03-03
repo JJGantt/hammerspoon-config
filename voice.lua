@@ -1,16 +1,17 @@
 -- Voice Transcription
--- Caps Lock mode (toggle):
---   Space          : start recording (current model)
---   Option         : switch to base model
---   /              : switch to small model
---   '              : switch to medium model
---   ]              : switch to turbo model
 -- Always:
---   Double-tap Opt : start recording (base model, no caps lock needed)
+--   Double-tap Opt : start recording (base model)
+--   Opt+/ ' ]      : switch to small / medium / turbo model
 --   Release Option : stop + transcribe + paste
 --   Return         : stop + transcribe + paste + send
 --   Escape         : cancel
 --   Cmd+Opt+V      : paste last transcription (fallback)
+-- Caps Lock mode (light = on):
+--   Space          : start recording (current model)
+--   Space          : stop + send
+--   Cmd+Space      : stop + paste (no Enter)
+--   Option         : switch to base
+--   / ' ]          : switch to small / medium / turbo
 
 local SOX = "/opt/homebrew/bin/sox"
 local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
@@ -18,7 +19,7 @@ local MODEL_BASE   = os.getenv("HOME") .. "/whisper.cpp/models/ggml-base.en.bin"
 local MODEL_SMALL  = os.getenv("HOME") .. "/whisper.cpp/models/ggml-small.en.bin"
 local MODEL_MEDIUM = os.getenv("HOME") .. "/whisper.cpp/models/ggml-medium.en.bin"
 local MODEL_TURBO  = os.getenv("HOME") .. "/whisper.cpp/models/ggml-large-v3-turbo.bin"
-local MODEL = MODEL_BASE  -- default (double-tap Option)
+local MODEL = MODEL_BASE
 local WAV = "/tmp/hs-voice.wav"
 local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
@@ -50,12 +51,12 @@ local function log(msg)
     if f then f:write(line .. "\n") f:close() end
 end
 
-local lastTranscription = nil  -- most recent successful transcription
+local lastTranscription = nil
 local mode = nil       -- nil | "recording" | "transcribing"
-local modeChangedAt = 0        -- timestamp of last mode change
-local indicator = 0    -- how many chars of indicator are in the text field
+local modeChangedAt = 0
+local indicator = 0
 local lastOptUp = 0
-local capslockOn = false  -- tracked proactively; don't rely on per-event flags
+local capslockOn = false  -- toggled by counting Caps Lock keypresses (keycode 57)
 
 local function modelLabel(m)
     if     m == MODEL_BASE   then return "Base"
@@ -88,22 +89,18 @@ end
 -- IMPORTANT: all hs.task/timer/watcher refs stored at module scope to prevent GC
 local soxTask = nil
 local whisperTask = nil
-local whisperTimeout = nil  -- timer: kills whisper if it hangs
-local activeTimers = {}     -- holds refs to all doAfter timers to prevent GC
-local sendAfter = false     -- true = press Enter after pasting
-local targetWin = nil       -- window focused when recording started
-local currentModel = MODEL  -- model to use for current recording
+local whisperTimeout = nil
+local activeTimers = {}
+local sendAfter = false
+local targetWin = nil
+local currentModel = MODEL
 
--- Schedule a timer and keep a strong reference so GC can't collect it
 local function safeTimer(delay, fn)
-    local t = hs.timer.doAfter(delay, function()
-        fn()
-    end)
+    local t = hs.timer.doAfter(delay, function() fn() end)
     activeTimers[#activeTimers + 1] = t
     return t
 end
 
--- Clean up completed timers periodically (called from reset)
 local function cleanTimers()
     local live = {}
     for _, t in ipairs(activeTimers) do
@@ -119,7 +116,6 @@ local function setMode(newMode)
     if newMode == nil then showBorder(nil) end
 end
 
--- Type into the focused text field, replacing any existing indicator
 local function setIndicator(str)
     for i = 1, indicator do
         hs.eventtap.keyStroke({}, "delete", 0)
@@ -132,29 +128,19 @@ local function setIndicator(str)
     end
 end
 
--- Async pkill — never blocks the calling thread
 local function asyncPkill(pattern)
     hs.task.new("/usr/bin/pkill", nil, {"-9", "-f", pattern}):start()
 end
 
 local function killSox()
-    if soxTask then
-        soxTask:terminate()
-        soxTask = nil
-    end
+    if soxTask then soxTask:terminate() soxTask = nil end
     asyncPkill("sox.*hs-voice")
 end
 
 local function reset()
     killSox()
-    if whisperTask then
-        whisperTask:terminate()
-        whisperTask = nil
-    end
-    if whisperTimeout then
-        whisperTimeout:stop()
-        whisperTimeout = nil
-    end
+    if whisperTask then whisperTask:terminate() whisperTask = nil end
+    if whisperTimeout then whisperTimeout:stop() whisperTimeout = nil end
     asyncPkill("whisper-cli.*hs-voice")
     setIndicator(nil)
     targetWin = nil
@@ -168,12 +154,11 @@ local function ding(name)
 end
 
 local recordingStartedAt = 0
-local MIN_RECORD_SECS = 0.5  -- ignore Option release this soon after starting
+local MIN_RECORD_SECS = 0.5
 
 local function startRecording(model)
     currentModel = model or MODEL_BASE
-    local modelName = currentModel:match("ggml%-(.-)%.bin") or "?"
-    log("startRecording model=" .. modelName)
+    log("startRecording model=" .. modelLabel(currentModel))
     reset()
     targetWin = hs.window.focusedWindow()
     os.remove(WAV)
@@ -194,11 +179,8 @@ local function stopAndTranscribe()
     showBorder({red=1, green=0.6, blue=0, alpha=0.85})
     ding("Purr")
 
-    -- Focus the target window immediately so the ".." indicator (and later the
-    -- paste) all happen in the right place, not wherever the user happened to be.
     local function proceed()
         setIndicator("..")
-
         safeTimer(0.15, function()
             local f = io.open(WAV, "r")
             if not f then
@@ -241,7 +223,6 @@ local function stopAndTranscribe()
 
                     log("transcribed: " .. text:sub(1, 80))
 
-                    -- Save transcription so it's never lost
                     lastTranscription = text
                     local lf = io.open(LAST_TXT, "w")
                     if lf then lf:write(text) lf:close() end
@@ -250,7 +231,6 @@ local function stopAndTranscribe()
                     local prev = hs.pasteboard.getContents()
                     hs.pasteboard.setContents(text)
 
-                    -- targetWin already focused at the start of stopAndTranscribe
                     safeTimer(0.05, function()
                         hs.eventtap.keyStroke({"cmd"}, "v")
                         if sendAfter then
@@ -277,7 +257,6 @@ local function stopAndTranscribe()
             end, {"-m", currentModel, "-f", WAV, "--no-prints", "-nt"})
             whisperTask:start()
 
-            -- Whisper timeout — stored at module scope so GC can't collect it
             whisperTimeout = safeTimer(15, function()
                 if whisperTask then
                     log("WARN: whisper timed out after 15s — killing")
@@ -291,7 +270,7 @@ local function stopAndTranscribe()
                 whisperTimeout = nil
             end)
         end)
-    end -- proceed()
+    end
 
     if targetWin then
         targetWin:focus()
@@ -301,14 +280,17 @@ local function stopAndTranscribe()
     end
 end
 
--- Track Caps Lock state proactively so it's always current when Space is pressed
-local capslockTracker = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
-    capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true
+-- Caps Lock toggle — keycode 57, just flip the boolean
+local capslockTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
+    if event:getKeyCode() == 57 then
+        capslockOn = not capslockOn
+        log("capslockOn = " .. tostring(capslockOn))
+    end
     return false
 end)
-capslockTracker:start()
+capslockTap:start()
 
--- Option key watcher — callback returns IMMEDIATELY, defers all work
+-- Option key watcher
 local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
     local flags = event:getFlags()
     local kc = event:getKeyCode()
@@ -317,22 +299,18 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
 
     local optDown = flags.alt == true
     if optDown then
-        -- Caps Lock mode: Option down = switch to base
         if capslockOn and mode == nil then
             currentModel = MODEL_BASE
-            hs.alert.show("Model: Base", 1)
+            hs.alert.show("Model: " .. modelLabel(MODEL_BASE), 1)
             return true
         end
         return false
     end
 
-    -- Option was released — defer all work
-    if mode == "recording" then
+    -- Option released
+    if mode == "recording" and not capslockOn then
         local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
-        if elapsed < MIN_RECORD_SECS then
-            -- Too soon after starting (e.g. Opt+key release) — ignore
-            return false
-        end
+        if elapsed < MIN_RECORD_SECS then return false end
         safeTimer(0, function()
             log("opt-release: stopping recording")
             sendAfter = false
@@ -343,9 +321,7 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     end
 
     if mode ~= nil then return false end
-
-    -- Caps Lock mode: don't use Option release to trigger recording
-    if capslockOn then return false end  -- don't double-tap in caps lock mode
+    if capslockOn then return false end
 
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
@@ -362,24 +338,35 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
     local kc = event:getKeyCode()
     local flags = event:getFlags()
 
-    -- Caps Lock mode: single-key actions (only when idle)
-    if capslockOn and mode == nil then
-        if kc == 49 then  -- Space = start recording
-            safeTimer(0, function() startRecording(currentModel) end)
-            return true
+    -- Caps Lock mode
+    if capslockOn then
+        if kc == 49 then  -- Space
+            if mode == nil then
+                safeTimer(0, function() startRecording(currentModel) end)
+                return true
+            elseif mode == "recording" then
+                safeTimer(0, function()
+                    sendAfter = not flags.cmd
+                    stopAndTranscribe()
+                end)
+                return true
+            end
         end
-        local m, label = nil, nil
-        if     kc == 44 then m, label = MODEL_SMALL,  "Small"
-        elseif kc == 39 then m, label = MODEL_MEDIUM, "Medium"
-        elseif kc == 30 then m, label = MODEL_TURBO,  "Turbo"
-        end
-        if m then
-            currentModel = m
-            hs.alert.show("Model: " .. label, 1)
-            return true
+        if mode == nil then
+            local m, label = nil, nil
+            if     kc == 44 then m, label = MODEL_SMALL,  "Small"
+            elseif kc == 39 then m, label = MODEL_MEDIUM, "Medium"
+            elseif kc == 30 then m, label = MODEL_TURBO,  "Turbo"
+            end
+            if m then
+                currentModel = m
+                hs.alert.show("Model: " .. label, 1)
+                return true
+            end
         end
     end
 
+    -- Escape cancels
     if kc == 53 and mode ~= nil then
         safeTimer(0, function()
             log("escape: cancelling (mode=" .. tostring(mode) .. ")")
@@ -389,16 +376,7 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         return true
     end
 
-    -- Caps Lock mode: Space stops recording (Cmd+Space = paste only, Space = send)
-    if kc == 49 and mode == "recording" and capslockOn then
-        safeTimer(0, function()
-            log("capslock space: stopping recording (send=" .. tostring(not flags.cmd) .. ")")
-            sendAfter = not flags.cmd
-            stopAndTranscribe()
-        end)
-        return true
-    end
-
+    -- Enter stops + sends
     if kc == 36 then
         if mode == "recording" then
             safeTimer(0, function()
@@ -412,7 +390,7 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
-    -- Opt+/ = small, Opt+' = medium, Opt+] = turbo (switch model, don't start)
+    -- Opt+/ ' ] = switch model
     if flags.alt and not flags.cmd and not flags.shift and not flags.ctrl and mode == nil then
         local m, label = nil, nil
         if     kc == 44 then m, label = MODEL_SMALL,  "Small"
@@ -430,35 +408,25 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
 end)
 keyTap:start()
 
--- Block mouse clicks during transcription so window focus can't change
+-- Block mouse clicks during transcription
 local clickBlock = hs.eventtap.new({hs.eventtap.event.types.leftMouseDown}, function()
     if mode == "transcribing" then return true end
     return false
 end)
 clickBlock:start()
 
--- Keep-alive + stuck state recovery — self-rescheduling chain
+-- Keep-alive + stuck state recovery
 local STUCK_TIMEOUT = 20
 local keepAliveCount = 0
 local function keepAliveTick()
     keepAliveCount = keepAliveCount + 1
-    -- Heartbeat every ~30s
     if keepAliveCount % 6 == 0 then
-        log(string.format("heartbeat (mode=%s)", tostring(mode)))
+        log(string.format("heartbeat (mode=%s capslock=%s)", tostring(mode), tostring(capslockOn)))
     end
-    if not optTap:isEnabled() then
-        log("WARN: optTap was disabled — restarting")
-        optTap:start()
-    end
-    if not keyTap:isEnabled() then
-        log("WARN: keyTap was disabled — restarting")
-        keyTap:start()
-    end
-    if not clickBlock:isEnabled() then
-        log("WARN: clickBlock was disabled — restarting")
-        clickBlock:start()
-    end
-
+    if not optTap:isEnabled()      then log("WARN: optTap disabled — restarting")      optTap:start()      end
+    if not keyTap:isEnabled()      then log("WARN: keyTap disabled — restarting")      keyTap:start()      end
+    if not clickBlock:isEnabled()  then log("WARN: clickBlock disabled — restarting")  clickBlock:start()  end
+    if not capslockTap:isEnabled() then log("WARN: capslockTap disabled — restarting") capslockTap:start() end
     if mode == "transcribing" then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
@@ -467,7 +435,6 @@ local function keepAliveTick()
             reset()
         end
     end
-    -- Schedule next tick
     safeTimer(5, keepAliveTick)
 end
 safeTimer(5, keepAliveTick)
@@ -477,17 +444,18 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
     if event == hs.caffeinate.watcher.systemDidWake
     or event == hs.caffeinate.watcher.screensDidUnlock then
         hs.timer.doAfter(1, function()
-            if not optTap:isEnabled() then optTap:start() end
-            if not keyTap:isEnabled() then keyTap:start() end
+            if not optTap:isEnabled()      then optTap:start()      end
+            if not keyTap:isEnabled()      then keyTap:start()      end
+            if not capslockTap:isEnabled() then capslockTap:start() end
+            capslockOn = false
             reset()
         end)
     end
 end)
 wakeWatcher:start()
 
--- Cmd+Opt+V: paste last transcription (fallback if normal paste failed)
+-- Cmd+Opt+V: paste last transcription (fallback)
 hs.hotkey.bind({"cmd", "alt"}, "v", function()
-    -- Try in-memory first, fall back to file
     local text = lastTranscription
     if not text then
         local f = io.open(LAST_TXT, "r")
