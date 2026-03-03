@@ -380,6 +380,17 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end)
         return true
     end
+
+    -- Caps Lock mode: Space stops recording (Cmd+Space = paste only, Space = send)
+    if kc == 49 and mode == "recording" and hs.eventtap.checkKeyboardModifiers().capslock then
+        safeTimer(0, function()
+            log("capslock space: stopping recording (send=" .. tostring(not flags.cmd) .. ")")
+            sendAfter = not flags.cmd
+            stopAndTranscribe()
+        end)
+        return true
+    end
+
     if kc == 36 then
         if mode == "recording" then
             safeTimer(0, function()
