@@ -1,9 +1,16 @@
 -- Voice Transcription
--- Double-tap Option: start recording
--- Release Option: stop + transcribe + paste in place
--- Return (while recording): stop + transcribe + paste + send
--- Escape: cancel
--- Cmd+Opt+V: paste last transcription (fallback if paste failed)
+-- Caps Lock mode (toggle):
+--   Space          : start recording (current model)
+--   Option         : switch to base model
+--   /              : switch to small model
+--   '              : switch to medium model
+--   ]              : switch to turbo model
+-- Always:
+--   Double-tap Opt : start recording (base model, no caps lock needed)
+--   Release Option : stop + transcribe + paste
+--   Return         : stop + transcribe + paste + send
+--   Escape         : cancel
+--   Cmd+Opt+V      : paste last transcription (fallback)
 
 local SOX = "/opt/homebrew/bin/sox"
 local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
@@ -48,6 +55,15 @@ local mode = nil       -- nil | "recording" | "transcribing"
 local modeChangedAt = 0        -- timestamp of last mode change
 local indicator = 0    -- how many chars of indicator are in the text field
 local lastOptUp = 0
+local capslockMode = false     -- true when Caps Lock is on
+
+local function modelLabel(m)
+    if     m == MODEL_BASE   then return "Base"
+    elseif m == MODEL_SMALL  then return "Small"
+    elseif m == MODEL_MEDIUM then return "Medium"
+    elseif m == MODEL_TURBO  then return "Turbo"
+    else return m:match("ggml%-(.-)%.bin") or "?" end
+end
 
 -- Screen border highlight: red=recording, amber=transcribing, nil=off
 local recordBorder = nil
@@ -293,7 +309,15 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     if flags.cmd or flags.shift or flags.ctrl then return false end
 
     local optDown = flags.alt == true
-    if optDown then return false end
+    if optDown then
+        -- Caps Lock mode: Option down = switch to base
+        if capslockMode and mode == nil then
+            currentModel = MODEL_BASE
+            hs.alert.show("Model: Base", 1)
+            return true
+        end
+        return false
+    end
 
     -- Option was released — defer all work
     if mode == "recording" then
@@ -313,6 +337,9 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
 
     if mode ~= nil then return false end
 
+    -- Caps Lock mode: don't use Option release to trigger recording
+    if capslockMode then return false end
+
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
         lastOptUp = 0
@@ -324,10 +351,27 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
 end)
 optTap:start()
 
--- Escape to cancel, Return to send, Opt+/'" to start with specific model
 local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
     local kc = event:getKeyCode()
     local flags = event:getFlags()
+
+    -- Caps Lock mode: single-key actions (only when idle)
+    if capslockMode and mode == nil then
+        if kc == 49 then  -- Space = start recording
+            safeTimer(0, function() startRecording(currentModel) end)
+            return true
+        end
+        local m, label = nil, nil
+        if     kc == 44 then m, label = MODEL_SMALL,  "Small"
+        elseif kc == 39 then m, label = MODEL_MEDIUM, "Medium"
+        elseif kc == 30 then m, label = MODEL_TURBO,  "Turbo"
+        end
+        if m then
+            currentModel = m
+            hs.alert.show("Model: " .. label, 1)
+            return true
+        end
+    end
 
     if kc == 53 and mode ~= nil then
         safeTimer(0, function()
@@ -350,15 +394,16 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
-    -- Opt+/ = small, Opt+' = medium, Opt+] = large-v3-turbo
+    -- Opt+/ = small, Opt+' = medium, Opt+] = turbo (switch model, don't start)
     if flags.alt and not flags.cmd and not flags.shift and not flags.ctrl and mode == nil then
-        local m = nil
-        if     kc == 44 then m = MODEL_SMALL
-        elseif kc == 39 then m = MODEL_MEDIUM
-        elseif kc == 30 then m = MODEL_TURBO
+        local m, label = nil, nil
+        if     kc == 44 then m, label = MODEL_SMALL,  "Small"
+        elseif kc == 39 then m, label = MODEL_MEDIUM, "Medium"
+        elseif kc == 30 then m, label = MODEL_TURBO,  "Turbo"
         end
         if m then
-            safeTimer(0, function() startRecording(m) end)
+            currentModel = m
+            hs.alert.show("Model: " .. label, 1)
             return true
         end
     end
@@ -366,6 +411,17 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
     return false
 end)
 keyTap:start()
+
+-- Caps Lock state watcher
+local capslockWatcher = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
+    local state = event:getFlags().capslock == true
+    if state ~= capslockMode then
+        capslockMode = state
+        log("capslock mode: " .. tostring(capslockMode))
+    end
+    return false
+end)
+capslockWatcher:start()
 
 -- Block mouse clicks during transcription so window focus can't change
 local clickBlock = hs.eventtap.new({hs.eventtap.event.types.leftMouseDown}, function()
@@ -395,6 +451,10 @@ local function keepAliveTick()
         log("WARN: clickBlock was disabled — restarting")
         clickBlock:start()
     end
+    if not capslockWatcher:isEnabled() then
+        log("WARN: capslockWatcher was disabled — restarting")
+        capslockWatcher:start()
+    end
     if mode == "transcribing" then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
@@ -415,6 +475,7 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
         hs.timer.doAfter(1, function()
             if not optTap:isEnabled() then optTap:start() end
             if not keyTap:isEnabled() then keyTap:start() end
+            if not capslockWatcher:isEnabled() then capslockWatcher:start() end
             reset()
         end)
     end
