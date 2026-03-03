@@ -66,6 +66,29 @@ local function modelLabel(m)
     else return m:match("ggml%-(.-)%.bin") or "?" end
 end
 
+-- Caps Lock mode indicator: thin blue border on every screen, across all Spaces
+local capslockBorders = {}
+local function showCapslockBorder(show)
+    for _, b in ipairs(capslockBorders) do b:delete() end
+    capslockBorders = {}
+    if not show then return end
+    for _, screen in ipairs(hs.screen.allScreens()) do
+        local f = screen:fullFrame()
+        local b = hs.canvas.new(f)
+        b[1] = {
+            type        = "rectangle",
+            action      = "stroke",
+            strokeColor = {red=0.3, green=0.65, blue=1.0, alpha=0.5},
+            strokeWidth = 3,
+            frame       = {x=1.5, y=1.5, w=f.w-3, h=f.h-3},
+        }
+        b:level(hs.canvas.windowLevels.overlay)
+        b:behaviorAsLabels({"canJoinAllSpaces", "stationary"})
+        b:show()
+        capslockBorders[#capslockBorders + 1] = b
+    end
+end
+
 -- Screen border highlight: red=recording, amber=transcribing, nil=off
 local recordBorder = nil
 local function showBorder(color)
@@ -290,11 +313,13 @@ local capslockTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, func
             capslockLastToggle = now
             capslockOn = not capslockOn
             log("capslockOn = " .. tostring(capslockOn))
+            showCapslockBorder(capslockOn)
         end
     end
     return false
 end)
 capslockTap:start()
+showCapslockBorder(capslockOn)  -- draw initial state on load
 
 -- Option key watcher
 local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
@@ -433,6 +458,7 @@ local function keepAliveTick()
     if hwCapslock ~= capslockOn then
         capslockOn = hwCapslock
         log("capslock sync: hardware=" .. tostring(hwCapslock))
+        showCapslockBorder(capslockOn)
     end
     if keepAliveCount % 6 == 0 then
         log(string.format("heartbeat (mode=%s capslock=%s)", tostring(mode), tostring(capslockOn)))
@@ -464,10 +490,17 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
             capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true
             log("wake: capslockOn = " .. tostring(capslockOn))
             reset()
+            showCapslockBorder(capslockOn)
         end)
     end
 end)
 wakeWatcher:start()
+
+-- Redraw caps lock border if monitors change
+local screenWatcher = hs.screen.watcher.new(function()
+    showCapslockBorder(capslockOn)
+end)
+screenWatcher:start()
 
 -- Cmd+Opt+V: paste last transcription (fallback)
 hs.hotkey.bind({"cmd", "alt"}, "v", function()
