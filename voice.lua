@@ -83,7 +83,7 @@ local function showCapslockBorder(show)
             frame       = {x=1.5, y=1.5, w=f.w-3, h=f.h-3},
         }
         b:level(hs.canvas.windowLevels.overlay)
-        b:behaviorAsLabels({"canJoinAllSpaces", "stationary"})
+        b:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces | hs.canvas.windowBehaviors.stationary)
         b:show()
         capslockBorders[#capslockBorders + 1] = b
     end
