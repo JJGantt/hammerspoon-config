@@ -280,11 +280,15 @@ local function stopAndTranscribe()
     end
 end
 
--- Caps Lock toggle — keycode 57, just flip the boolean
+-- Caps Lock tracker — keycode 57 fires twice per press (down+up), so read
+-- the actual state from flags rather than toggling
 local capslockTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
     if event:getKeyCode() == 57 then
-        capslockOn = not capslockOn
-        log("capslockOn = " .. tostring(capslockOn))
+        local new = event:getFlags().capslock == true
+        if new ~= capslockOn then
+            capslockOn = new
+            log("capslockOn = " .. tostring(capslockOn))
+        end
     end
     return false
 end)
