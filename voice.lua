@@ -429,6 +429,11 @@ local STUCK_TIMEOUT = 20
 local keepAliveCount = 0
 local function keepAliveTick()
     keepAliveCount = keepAliveCount + 1
+    local hwCapslock = hs.eventtap.checkKeyboardModifiers().capslock == true
+    if hwCapslock ~= capslockOn then
+        capslockOn = hwCapslock
+        log("capslock sync: hardware=" .. tostring(hwCapslock))
+    end
     if keepAliveCount % 6 == 0 then
         log(string.format("heartbeat (mode=%s capslock=%s)", tostring(mode), tostring(capslockOn)))
     end
