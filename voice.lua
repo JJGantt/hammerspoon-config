@@ -223,18 +223,22 @@ local function stopAndTranscribe()
         local prev = hs.pasteboard.getContents()
         hs.pasteboard.setContents(text)
 
-        -- tmux pane: write to temp file, load into tmux buffer, paste + Enter
-        if targetPane and sendAfter then
+        -- tmux pane: write to temp file, load into tmux buffer, paste (+ Enter if sendAfter)
+        if targetPane then
             local tmpFile = "/tmp/hs-voice-input.txt"
+            local content = sendAfter and text or (text .. " ")
             local f = io.open(tmpFile, "w")
-            if f then f:write(text) f:close() end
+            if f then f:write(content) f:close() end
             local cmd = string.format(
-                "/opt/homebrew/bin/tmux load-buffer %s && /opt/homebrew/bin/tmux paste-buffer -t '%s' && /opt/homebrew/bin/tmux send-keys -t '%s' Enter",
-                tmpFile, targetPane, targetPane
+                "/opt/homebrew/bin/tmux load-buffer %s && /opt/homebrew/bin/tmux paste-buffer -t '%s'",
+                tmpFile, targetPane
             )
+            if sendAfter then
+                cmd = cmd .. string.format(" && /opt/homebrew/bin/tmux send-keys -t '%s' Enter", targetPane)
+            end
             hs.execute(cmd)
             if prev then hs.pasteboard.setContents(prev) end
-            log("sent via tmux: " .. targetPane)
+            log((sendAfter and "sent" or "pasted") .. " via tmux: " .. targetPane)
             setMode(nil)
             return
         end
