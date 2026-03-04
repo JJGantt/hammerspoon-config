@@ -369,8 +369,8 @@ end
 -- so only the first event per physical press actually toggles
 local capslockTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
     if event:getKeyCode() == 57 then
-        -- Read actual hardware state instead of toggling to prevent drift
-        local actual = hs.eventtap.checkKeyboardModifiers().capslock == true
+        -- checkKeyboardModifiers returns the pre-toggle state during the event, so invert it
+        local actual = not (hs.eventtap.checkKeyboardModifiers().capslock == true)
         if actual ~= capslockOn then
             capslockOn = actual
             log("capslockOn = " .. tostring(capslockOn))
