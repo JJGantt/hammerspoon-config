@@ -319,12 +319,20 @@ local function stopAndTranscribe()
                 local apiKey = kf:read("*a"):match("^%s*(.-)%s*$")
                 kf:close()
 
-                whisperTask = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+                local curlCmd = string.format(
+                    '/usr/bin/curl -sS -X POST "https://api.openai.com/v1/audio/transcriptions" '
+                    .. '-H "Authorization: Bearer %s" '
+                    .. '-F "file=@%s" '
+                    .. '-F "model=whisper-1" '
+                    .. '-F "response_format=verbose_json" '
+                    .. '-F "language=en"',
+                    apiKey, WAV
+                )
+                whisperTask = hs.task.new("/bin/sh", function(code, stdout, stderr)
                     local ok, err = pcall(function()
                         whisperTask = nil
                         if code ~= 0 then
                             log("WARN: API curl failed (code " .. tostring(code) .. "): " .. (stderr or ""):sub(1, 200))
-                            log("WARN: API stdout: " .. (stdout or ""):sub(1, 200))
                             log("falling back to local whisper")
                             runLocalWhisper()
                             return
@@ -342,15 +350,7 @@ local function stopAndTranscribe()
                         log("ERROR in API callback: " .. tostring(err) .. " — falling back to local")
                         runLocalWhisper()
                     end
-                end, {
-                    "-sS", "-X", "POST",
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    "-H", "Authorization: Bearer " .. apiKey,
-                    "-F", "file=@" .. WAV,
-                    "-F", "model=whisper-1",
-                    "-F", "response_format=verbose_json",
-                    "-F", "language=en",
-                })
+                end, {"-c", curlCmd})
                 whisperTask:start()
             else
                 runLocalWhisper()
@@ -483,13 +483,37 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
-    -- Adaptive space: non-capslock, no prior typing → voice recording
+    -- Adaptive space: non-capslock → voice recording if input is empty
     if not capslockOn and kc == 49 and not flags.alt and not flags.cmd
        and event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then
-        if mode == nil and not hasTyped then
-            log("adaptive space: starting recording")
-            safeTimer(0, function() startRecording(currentModel) end)
-            return true
+        if mode == nil then
+            local shouldRecord = false
+            if not hasTyped then
+                -- General case: no typing since last reset event
+                shouldRecord = true
+            else
+                -- tmux case: check if Claude Code input is actually empty
+                local win = hs.window.focusedWindow()
+                local tty = getTerminalTTY(win)
+                local pane = getTmuxPane(tty)
+                if pane then
+                    local out, ok = hs.execute("/opt/homebrew/bin/tmux capture-pane -t '" .. pane .. "' -p 2>/dev/null")
+                    if ok and out then
+                        -- Find the last non-empty line
+                        local lastLine = ""
+                        for line in out:gmatch("[^\n]+") do lastLine = line end
+                        -- Claude Code prompt is "> " when input is empty
+                        if lastLine:match("^>%s*$") or lastLine:match("^%$%s*$") then
+                            shouldRecord = true
+                        end
+                    end
+                end
+            end
+            if shouldRecord then
+                log("adaptive space: starting recording")
+                safeTimer(0, function() startRecording(currentModel) end)
+                return true
+            end
         elseif mode == "recording" then
             local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
             if elapsed < MIN_RECORD_SECS then return true end
