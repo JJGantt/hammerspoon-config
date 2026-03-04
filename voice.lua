@@ -180,9 +180,9 @@ end
 -- Terminal.app's TTY matches the tmux CLIENT tty, not the pane tty.
 local function getTmuxPane(tty)
     if not tty then return nil end
-    local ok, out = hs.execute("tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null")
-    if not ok or not out or out == "" then return nil end
-    for line in out:gmatch("[^\n]+") do
+    local output, status = hs.execute("tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null")
+    if not status or not output or output == "" then return nil end
+    for line in output:gmatch("[^\n]+") do
         local clientTTY, session = line:match("^(/dev/%S+)%s+(%S+)$")
         if clientTTY == tty then return session end
     end
