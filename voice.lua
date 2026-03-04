@@ -571,12 +571,6 @@ local clickBlock = hs.eventtap.new({hs.eventtap.event.types.leftMouseDown}, func
 end)
 clickBlock:start()
 
--- Reset typing state on window focus change
-local focusFilter = hs.window.filter.default
-focusFilter:subscribe(hs.window.filter.windowFocused, function()
-    hasTyped = false
-end)
-
 -- Keep-alive + stuck state recovery
 local STUCK_TIMEOUT = 120
 local keepAliveCount = 0
