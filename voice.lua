@@ -412,6 +412,21 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
 
     -- Caps Lock mode
     if capslockOn then
+        -- / ' ] \ = switch persistent model (no Option needed)
+        if mode == nil and not flags.alt and not flags.cmd then
+            local m = nil
+            if     kc == 44 then m = MODEL_SMALL
+            elseif kc == 39 then m = MODEL_MEDIUM
+            elseif kc == 30 then m = MODEL_TURBO
+            elseif kc == 42 then m = MODEL_API
+            end
+            if m then
+                currentModel = m
+                hs.alert.show("Model: " .. modelLabel(m), 1)
+                return true
+            end
+        end
+
         if kc == 49 and event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then  -- Space, no repeat
             log("capslock space (mode=" .. tostring(mode) .. ")")
             if mode == nil then
