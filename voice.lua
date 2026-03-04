@@ -187,6 +187,12 @@ end
 local function stopAndTranscribe()
     log("stopAndTranscribe (sendAfter=" .. tostring(sendAfter) .. ")")
     killSox()
+    local recordingSecs = hs.timer.secondsSinceEpoch() - recordingStartedAt
+    local useModel = currentModel
+    if recordingSecs > 30 and useModel ~= MODEL_API then
+        log(string.format("adaptive: %.0fs recording, switching to API", recordingSecs))
+        useModel = MODEL_API
+    end
     setMode("transcribing")
     ding("Purr")
 
@@ -263,7 +269,7 @@ local function stopAndTranscribe()
             end
             f:close()
 
-            if currentModel == MODEL_API then
+            if useModel == MODEL_API then
                 -- OpenAI Whisper API
                 local kf = io.open(OPENAI_KEY_FILE, "r")
                 if not kf then
@@ -337,7 +343,7 @@ local function stopAndTranscribe()
                         setMode(nil)
                         hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
                     end
-                end, {"-m", currentModel, "-f", WAV, "--no-prints", "-nt"})
+                end, {"-m", useModel, "-f", WAV, "--no-prints", "-nt"})
                 whisperTask:start()
             end
         end)
