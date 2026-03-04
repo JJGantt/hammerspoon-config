@@ -163,12 +163,14 @@ local function killSox()
 end
 
 -- If the focused window is a Terminal tab, return its TTY device path.
+-- Uses the specific window ID rather than "front window" to avoid mismatches.
 local function getTerminalTTY(win)
     if not win then return nil end
     local app = win:application()
     if not app or app:bundleID() ~= "com.apple.Terminal" then return nil end
+    local winId = win:id()
     local ok, tty = hs.osascript.applescript(
-        'tell application "Terminal" to return tty of selected tab of front window'
+        string.format('tell application "Terminal" to return tty of selected tab of window id %d', winId)
     )
     if ok and tty and tty:match("^/dev/") then return tty end
     return nil
