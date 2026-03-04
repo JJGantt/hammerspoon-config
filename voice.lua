@@ -268,34 +268,42 @@ local function stopAndTranscribe()
 
                     setIndicator(nil)
 
-                    -- Terminal tab: inject via do script — no focus steal
-                    -- Append (ASCII character 13) = \r so Ink sees key.return and submits.
-                    -- do script always appends \n after, but \r fires submit first.
+                    local prev = hs.pasteboard.getContents()
+                    hs.pasteboard.setContents(text)
+
+                    -- TTY path: select exact tab, briefly focus, paste+Return, restore focus
                     if targetTTY and sendAfter then
-                        local escaped = text:gsub('\\', '\\\\'):gsub('"', '\\"')
-                        local ok = hs.osascript.applescript(string.format([[
+                        local restoreWin = hs.window.focusedWindow()
+                        -- Select the right tab and activate Terminal
+                        hs.osascript.applescript(string.format([[
                             tell application "Terminal"
                                 repeat with w in windows
                                     repeat with t in tabs of w
                                         if (tty of t) is "%s" then
-                                            do script "%s" & (ASCII character 13) in t
+                                            set selected of t to true
+                                            activate
                                             return
                                         end if
                                     end repeat
                                 end repeat
                             end tell
-                        ]], targetTTY, escaped))
-                        if ok then
-                            log("sent via TTY: " .. targetTTY)
-                            setMode(nil)
-                            return
-                        end
-                        log("WARN: TTY injection failed, falling back to paste")
+                        ]], targetTTY))
+                        safeTimer(0.15, function()
+                            hs.eventtap.keyStroke({"cmd"}, "v")
+                            safeTimer(0.1, function()
+                                hs.eventtap.keyStroke({}, "return")
+                                safeTimer(0.1, function()
+                                    if prev then hs.pasteboard.setContents(prev) end
+                                    if restoreWin then restoreWin:focus() end
+                                    log("sent via TTY tab: " .. targetTTY)
+                                    setMode(nil)
+                                end)
+                            end)
+                        end)
+                        return
                     end
 
-                    -- Paste fallback: focus the window and paste
-                    local prev = hs.pasteboard.getContents()
-                    hs.pasteboard.setContents(text)
+                    -- Non-TTY paste: focus target window and paste
                     local function doPaste()
                         hs.eventtap.keyStroke({"cmd"}, "v")
                         if sendAfter then
