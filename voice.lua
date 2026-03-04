@@ -427,8 +427,36 @@ optTap:start()
 local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
     local kc = event:getKeyCode()
     local flags = event:getFlags()
+    local noRepeat = event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0
 
-    -- Caps Lock mode
+    -- ── UNIVERSAL (both modes) ───────────────────────────────────────────────
+
+    -- Escape: cancel recording/transcription
+    if kc == 53 and mode ~= nil then
+        safeTimer(0, function()
+            log("escape: cancelling (mode=" .. tostring(mode) .. ")")
+            reset()
+            hs.alert.show("Cancelled")
+        end)
+        return true
+    end
+
+    -- Enter: stop recording + send
+    if kc == 36 then
+        if mode == "recording" then
+            safeTimer(0, function()
+                log("enter: stopping recording to send")
+                sendAfter = true
+                stopAndTranscribe()
+            end)
+            return true
+        elseif mode == "transcribing" then
+            return true
+        end
+    end
+
+    -- ── CAPS LOCK MODE ───────────────────────────────────────────────────────
+
     if capslockOn then
         -- / ' ] \ = switch persistent model (no Option needed)
         if mode == nil and not flags.alt and not flags.cmd then
@@ -445,14 +473,15 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
             end
         end
 
-        if kc == 49 and event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then  -- Space, no repeat
+        -- Space: start recording / stop + send (Cmd+Space = stop + paste)
+        if kc == 49 and noRepeat then
             log("capslock space (mode=" .. tostring(mode) .. ")")
             if mode == nil then
                 safeTimer(0, function() startRecording(currentModel) end)
                 return true
             elseif mode == "recording" then
                 local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
-                if elapsed < MIN_RECORD_SECS then return true end  -- too soon, swallow it
+                if elapsed < MIN_RECORD_SECS then return true end
                 safeTimer(0, function()
                     sendAfter = not flags.cmd
                     stopAndTranscribe()
@@ -460,52 +489,38 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
                 return true
             end
         end
+
+        return false  -- let everything else through in caps lock mode
     end
 
-    -- Escape cancels
-    if kc == 53 and mode ~= nil then
-        safeTimer(0, function()
-            log("escape: cancelling (mode=" .. tostring(mode) .. ")")
-            reset()
-            hs.alert.show("Cancelled")
-        end)
-        return true
-    end
+    -- ── CAPS LOCK OFF ────────────────────────────────────────────────────────
 
-    -- Enter stops + sends
-    if kc == 36 then
+    -- Adaptive space: start recording if input is empty (Cmd+Space = Spotlight, let through)
+    if kc == 49 and noRepeat and not flags.alt then
         if mode == "recording" then
+            -- Stop recording: Cmd+Space = paste only, plain Space = send
+            local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
+            if elapsed < MIN_RECORD_SECS then return true end
             safeTimer(0, function()
-                log("enter: stopping recording to send")
-                sendAfter = true
+                sendAfter = not flags.cmd
                 stopAndTranscribe()
             end)
             return true
-        elseif mode == "transcribing" then
-            return true
-        end
-    end
-
-    -- Adaptive space: non-capslock → voice recording if input is empty
-    if not capslockOn and kc == 49 and not flags.alt and not flags.cmd
-       and event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then
-        if mode == nil then
+        elseif mode == nil and not flags.cmd then
+            -- Start recording only if input appears empty
             local shouldRecord = false
             if not hasTyped then
-                -- General case: no typing since last reset event
                 shouldRecord = true
             else
-                -- tmux case: check if Claude Code input is actually empty
+                -- tmux: check actual pane content in case user backspaced everything
                 local win = hs.window.focusedWindow()
                 local tty = getTerminalTTY(win)
                 local pane = getTmuxPane(tty)
                 if pane then
                     local out, ok = hs.execute("/opt/homebrew/bin/tmux capture-pane -t '" .. pane .. "' -p 2>/dev/null")
                     if ok and out then
-                        -- Find the last non-empty line
                         local lastLine = ""
                         for line in out:gmatch("[^\n]+") do lastLine = line end
-                        -- Claude Code prompt is "> " when input is empty
                         if lastLine:match("^>%s*$") or lastLine:match("^%$%s*$") then
                             shouldRecord = true
                         end
@@ -517,14 +532,6 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
                 safeTimer(0, function() startRecording(currentModel) end)
                 return true
             end
-        elseif mode == "recording" then
-            local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
-            if elapsed < MIN_RECORD_SECS then return true end
-            safeTimer(0, function()
-                sendAfter = not flags.cmd
-                stopAndTranscribe()
-            end)
-            return true
         end
     end
 
