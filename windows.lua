@@ -28,10 +28,63 @@ end
 
 -- ── Claude terminal launcher ──────────────────────────────────────────────────
 
+local ITERM_SCRIPT = os.getenv("HOME") .. "/.hammerspoon/open-claude-iterm.sh"
+
+local function applyWindowSize(win)
+    if hasMonitor() then
+        local saved = hs.settings.get(POSITION_KEY)
+        if saved then
+            win:setFrame(hs.geometry.rect(saved.x, saved.y, saved.w, saved.h))
+        else
+            local s = hs.screen.mainScreen():frame()
+            win:setFrame(hs.geometry.rect(s.x + s.w * 0.33, s.y, s.w * 0.67, s.h))
+        end
+    else
+        win:setFullScreen(true)
+    end
+end
+
+local function openClaudeIterm(app, hasWindows)
+    if hasWindows then
+        -- Get current iTerm2 session TTY, use it to find + target the tmux session
+        local ok, tty = hs.osascript.applescript([[
+            tell application "iTerm2"
+                return tty of current session of current window
+            end tell
+        ]])
+        if ok and tty and tty ~= "" then
+            hs.execute(ITERM_SCRIPT .. " " .. tty .. " &")
+        else
+            -- AppleScript failed — fall back to Cmd+T new tab
+            app:activate()
+            hs.timer.doAfter(0.15, function()
+                hs.eventtap.keyStroke({"cmd"}, "t")
+                hs.timer.doAfter(0.3, function()
+                    hs.eventtap.keyStrokes(CLAUDE_CMD .. "\n")
+                end)
+            end)
+        end
+    else
+        hs.execute('osascript -e \'tell application "iTerm2" to create window with default profile command "' .. CLAUDE_CMD .. '"\'')
+        hs.timer.doAfter(0.6, function()
+            local newApp = hs.application.get(ITERM_BUNDLE)
+            if not newApp then return end
+            local win = newApp:mainWindow()
+            if win then applyWindowSize(win) end
+        end)
+    end
+end
+
 local function openClaude()
     local app, appType = getTerminalApp()
     local hasWindows = app and #app:allWindows() > 0
 
+    if appType == "iterm2" then
+        openClaudeIterm(app, hasWindows)
+        return
+    end
+
+    -- Terminal.app path (unchanged)
     if hasWindows then
         app:activate()
         hs.timer.doAfter(0.15, function()
@@ -41,29 +94,12 @@ local function openClaude()
             end)
         end)
     else
-        if appType == "iterm2" then
-            hs.execute('osascript -e \'tell application "iTerm2" to create window with default profile command "' .. CLAUDE_CMD .. '"\'')
-        else
-            hs.execute('osascript -e \'tell application "Terminal" to do script "' .. CLAUDE_CMD .. '"\'')
-        end
-
+        hs.execute('osascript -e \'tell application "Terminal" to do script "' .. CLAUDE_CMD .. '"\'')
         hs.timer.doAfter(0.6, function()
-            local newApp = hs.application.get(appType == "iterm2" and ITERM_BUNDLE or TERMINAL_BUNDLE)
+            local newApp = hs.application.get(TERMINAL_BUNDLE)
             if not newApp then return end
             local win = newApp:mainWindow()
-            if not win then return end
-
-            if hasMonitor() then
-                local saved = hs.settings.get(POSITION_KEY)
-                if saved then
-                    win:setFrame(hs.geometry.rect(saved.x, saved.y, saved.w, saved.h))
-                else
-                    local s = hs.screen.mainScreen():frame()
-                    win:setFrame(hs.geometry.rect(s.x + s.w * 0.33, s.y, s.w * 0.67, s.h))
-                end
-            else
-                win:setFullScreen(true)
-            end
+            if win then applyWindowSize(win) end
         end)
     end
 end
