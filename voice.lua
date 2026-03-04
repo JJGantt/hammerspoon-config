@@ -1,4 +1,9 @@
 -- Voice Transcription
+-- Adaptive space (non-capslock, empty line):
+--   Space          : start recording (if no typing since last reset event)
+--   Space          : stop + send
+--   Cmd+Space      : stop + paste (no Enter)
+--   Reset events: mouse click, Enter, window focus change, voice delivery
 -- Always:
 --   Double-tap Opt : start recording (base model)
 --   Opt+/ ' ] \    : switch to small / medium / turbo / API model
@@ -59,6 +64,7 @@ local modeChangedAt = 0
 local indicator = 0
 local lastOptUp = 0
 local capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true  -- init from hardware
+local hasTyped = false  -- adaptive space: reset on click, Enter, focus change, voice delivery
 
 local function modelLabel(m)
     if     m == MODEL_BASE   then return "Base"
@@ -97,6 +103,7 @@ local function setMode(newMode)
     log(string.format("mode: %s -> %s", tostring(mode), tostring(newMode)))
     mode = newMode
     modeChangedAt = hs.timer.secondsSinceEpoch()
+    if newMode == nil then hasTyped = false end
 end
 
 local function setIndicator(str)
@@ -474,6 +481,24 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
+    -- Adaptive space: non-capslock, no prior typing → voice recording
+    if not capslockOn and kc == 49 and not flags.alt and not flags.cmd
+       and event:getProperty(hs.eventtap.event.properties.keyboardEventAutorepeat) == 0 then
+        if mode == nil and not hasTyped then
+            log("adaptive space: starting recording")
+            safeTimer(0, function() startRecording(currentModel) end)
+            return true
+        elseif mode == "recording" then
+            local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
+            if elapsed < MIN_RECORD_SECS then return true end
+            safeTimer(0, function()
+                sendAfter = not flags.cmd
+                stopAndTranscribe()
+            end)
+            return true
+        end
+    end
+
     -- Opt+/ ' ] \ = switch model and start recording (release Opt to stop)
     if flags.alt and not flags.cmd and not flags.shift and not flags.ctrl and mode == nil then
         local m, label = nil, nil
@@ -489,16 +514,32 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
+    -- Track typing for adaptive space (any non-consumed key = user is typing)
+    if not capslockOn and mode == nil then
+        if kc == 36 or kc == 76 then  -- Return/Enter resets (new line)
+            hasTyped = false
+        else
+            hasTyped = true
+        end
+    end
+
     return false
 end)
 keyTap:start()
 
--- Block mouse clicks during transcription
+-- Block mouse clicks during transcription + reset typing state on click
 local clickBlock = hs.eventtap.new({hs.eventtap.event.types.leftMouseDown}, function()
     if mode == "transcribing" then return true end
+    hasTyped = false
     return false
 end)
 clickBlock:start()
+
+-- Reset typing state on window focus change
+local focusFilter = hs.window.filter.default
+focusFilter:subscribe(hs.window.filter.windowFocused, function()
+    hasTyped = false
+end)
 
 -- Keep-alive + stuck state recovery
 local STUCK_TIMEOUT = 120
