@@ -1,9 +1,6 @@
 #!/bin/bash
-# Open a new Claude Code session in a new tmux window.
-# Each call opens a fresh Claude instance. The tmux session 'claude'
-# is created on first run; subsequent runs add a new window to it.
-if tmux has-session -t claude 2>/dev/null; then
-    tmux new-window -t claude -c ~/workspace \; send-keys 'claude --dangerously-skip-permissions' Enter
-else
-    tmux new-session -s claude -c ~/workspace \; send-keys 'claude --dangerously-skip-permissions' Enter
-fi
+# Open a new Claude Code session inside a fresh tmux session.
+# exec replaces this shell with tmux — the Terminal tab IS the tmux session.
+# Unique session name per tab so sessions never interfere with each other.
+SESSION="claude-$(date +%s)"
+exec tmux new-session -s "$SESSION" -c "$HOME/workspace" \; send-keys 'claude --dangerously-skip-permissions' Enter
