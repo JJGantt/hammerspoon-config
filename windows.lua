@@ -1,12 +1,13 @@
 -- Windows / Claude launcher / Layout manager
 --
 -- Cmd+/:         open a Claude session
--- Cmd+Opt+/:     save current Terminal window position (monitor layout)
+-- Cmd+Opt+/:     save current iTerm2 window position (monitor layout)
 -- Cmd+Opt+S:     save full window layout (context-aware: laptop or monitor slot)
 -- Cmd+Opt+R:     restore window layout for current context
 
 local CLAUDE_CMD = os.getenv("HOME") .. "/.hammerspoon/open-claude.sh"
 local POSITION_KEY = "terminal_monitor_frame"
+local ITERM_BUNDLE = "com.googlecode.iterm2"
 
 local function hasMonitor()
     return #hs.screen.allScreens() > 1
@@ -15,7 +16,7 @@ end
 -- ── Claude terminal launcher ──────────────────────────────────────────────────
 
 local function openClaude()
-    local app = hs.application.get("com.apple.Terminal")
+    local app = hs.application.get(ITERM_BUNDLE)
     local hasWindows = app and #app:allWindows() > 0
 
     if hasWindows then
@@ -27,10 +28,10 @@ local function openClaude()
             end)
         end)
     else
-        hs.execute('osascript -e \'tell application "Terminal" to do script "' .. CLAUDE_CMD .. '"\'')
+        hs.execute('osascript -e \'tell application "iTerm2" to create window with default profile command "' .. CLAUDE_CMD .. '"\'')
 
         hs.timer.doAfter(0.6, function()
-            local newApp = hs.application.get("com.apple.Terminal")
+            local newApp = hs.application.get(ITERM_BUNDLE)
             if not newApp then return end
             local win = newApp:mainWindow()
             if not win then return end
@@ -51,19 +52,19 @@ local function openClaude()
 end
 
 local function saveTerminalPosition()
-    local app = hs.application.get("com.apple.Terminal")
+    local app = hs.application.get(ITERM_BUNDLE)
     if not app then
-        hs.alert.show("Terminal not open")
+        hs.alert.show("iTerm2 not open")
         return
     end
     local win = app:focusedWindow()
     if not win then
-        hs.alert.show("No Terminal window focused")
+        hs.alert.show("No iTerm2 window focused")
         return
     end
     local f = win:frame()
     hs.settings.set(POSITION_KEY, {x = f.x, y = f.y, w = f.w, h = f.h})
-    hs.alert.show("Terminal position saved")
+    hs.alert.show("iTerm2 position saved")
 end
 
 -- ── Layout save / restore ─────────────────────────────────────────────────────
