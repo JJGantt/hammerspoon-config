@@ -7,16 +7,29 @@
 
 local CLAUDE_CMD = os.getenv("HOME") .. "/.hammerspoon/open-claude.sh"
 local POSITION_KEY = "terminal_monitor_frame"
-local ITERM_BUNDLE = "com.googlecode.iterm2"
+local ITERM_BUNDLE   = "com.googlecode.iterm2"
+local TERMINAL_BUNDLE = "com.apple.Terminal"
 
 local function hasMonitor()
     return #hs.screen.allScreens() > 1
 end
 
+-- Returns the active terminal app (iTerm2 preferred, falls back to Terminal.app)
+local function getTerminalApp()
+    local iterm = hs.application.get(ITERM_BUNDLE)
+    if iterm and iterm:isFrontmost() then return iterm, "iterm2" end
+    local term = hs.application.get(TERMINAL_BUNDLE)
+    if term and term:isFrontmost() then return term, "terminal" end
+    -- Neither is frontmost — prefer whichever is open, iTerm2 first
+    if iterm then return iterm, "iterm2" end
+    if term then return term, "terminal" end
+    return nil, "iterm2"  -- default to iTerm2 if nothing open
+end
+
 -- ── Claude terminal launcher ──────────────────────────────────────────────────
 
 local function openClaude()
-    local app = hs.application.get(ITERM_BUNDLE)
+    local app, appType = getTerminalApp()
     local hasWindows = app and #app:allWindows() > 0
 
     if hasWindows then
@@ -28,10 +41,14 @@ local function openClaude()
             end)
         end)
     else
-        hs.execute('osascript -e \'tell application "iTerm2" to create window with default profile command "' .. CLAUDE_CMD .. '"\'')
+        if appType == "iterm2" then
+            hs.execute('osascript -e \'tell application "iTerm2" to create window with default profile command "' .. CLAUDE_CMD .. '"\'')
+        else
+            hs.execute('osascript -e \'tell application "Terminal" to do script "' .. CLAUDE_CMD .. '"\'')
+        end
 
         hs.timer.doAfter(0.6, function()
-            local newApp = hs.application.get(ITERM_BUNDLE)
+            local newApp = hs.application.get(appType == "iterm2" and ITERM_BUNDLE or TERMINAL_BUNDLE)
             if not newApp then return end
             local win = newApp:mainWindow()
             if not win then return end
@@ -52,19 +69,19 @@ local function openClaude()
 end
 
 local function saveTerminalPosition()
-    local app = hs.application.get(ITERM_BUNDLE)
+    local app, appType = getTerminalApp()
     if not app then
-        hs.alert.show("iTerm2 not open")
+        hs.alert.show("No terminal open")
         return
     end
     local win = app:focusedWindow()
     if not win then
-        hs.alert.show("No iTerm2 window focused")
+        hs.alert.show("No terminal window focused")
         return
     end
     local f = win:frame()
     hs.settings.set(POSITION_KEY, {x = f.x, y = f.y, w = f.w, h = f.h})
-    hs.alert.show("iTerm2 position saved")
+    hs.alert.show((appType == "iterm2" and "iTerm2" or "Terminal") .. " position saved")
 end
 
 -- ── Layout save / restore ─────────────────────────────────────────────────────
