@@ -1,7 +1,7 @@
 -- Voice Transcription
 -- Always:
 --   Double-tap Opt : start recording (base model)
---   Opt+/ ' ]      : switch to small / medium / turbo model
+--   Opt+/ ' ] \    : switch to small / medium / turbo / API model
 --   Release Option : stop + transcribe + paste
 --   Return         : stop + transcribe + paste + send
 --   Escape         : cancel
@@ -11,7 +11,7 @@
 --   Space          : stop + send
 --   Cmd+Space      : stop + paste (no Enter)
 --   Option         : switch to base
---   / ' ]          : switch to small / medium / turbo
+--   / ' ] \        : switch to small / medium / turbo / API
 
 local SOX = "/opt/homebrew/bin/sox"
 local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
@@ -19,7 +19,9 @@ local MODEL_BASE   = os.getenv("HOME") .. "/whisper.cpp/models/ggml-base.en.bin"
 local MODEL_SMALL  = os.getenv("HOME") .. "/whisper.cpp/models/ggml-small.en.bin"
 local MODEL_MEDIUM = os.getenv("HOME") .. "/whisper.cpp/models/ggml-medium.en.bin"
 local MODEL_TURBO  = os.getenv("HOME") .. "/whisper.cpp/models/ggml-large-v3-turbo.bin"
+local MODEL_API    = "api"
 local MODEL = MODEL_BASE
+local OPENAI_KEY_FILE = os.getenv("HOME") .. "/.config/openai-api-key"
 local WAV = "/tmp/hs-voice.wav"
 local LAST_TXT = "/tmp/hs-voice-last.txt"
 local DOUBLE_TAP = 0.35
@@ -63,13 +65,13 @@ local function modelLabel(m)
     elseif m == MODEL_SMALL  then return "Small"
     elseif m == MODEL_MEDIUM then return "Medium"
     elseif m == MODEL_TURBO  then return "Turbo"
+    elseif m == MODEL_API    then return "API"
     else return m:match("ggml%-(.-)%.bin") or "?" end
 end
 
 -- IMPORTANT: all hs.task/timer/watcher refs stored at module scope to prevent GC
 local soxTask = nil
 local whisperTask = nil
-local whisperTimeout = nil
 local activeTimers = {}
 local sendAfter = false
 local targetWin = nil
@@ -148,7 +150,6 @@ end
 local function reset()
     killSox()
     if whisperTask then whisperTask:terminate() whisperTask = nil end
-    if whisperTimeout then whisperTimeout:stop() whisperTimeout = nil end
     asyncPkill("whisper-cli.*hs-voice")
     setIndicator(nil)
     targetWin = nil
@@ -189,6 +190,67 @@ local function stopAndTranscribe()
     setMode("transcribing")
     ding("Purr")
 
+    -- Deliver transcribed text to the target
+    local function deliver(text)
+        text = applySubs(text)
+        if text == "" then
+            setIndicator(nil)
+            setMode(nil)
+            hs.alert.show("No speech detected")
+            return
+        end
+
+        log("transcribed: " .. text:sub(1, 80))
+        lastTranscription = text
+        local lf = io.open(LAST_TXT, "w")
+        if lf then lf:write(text) lf:close() end
+
+        setIndicator(nil)
+
+        local prev = hs.pasteboard.getContents()
+        hs.pasteboard.setContents(text)
+
+        -- tmux pane: write to temp file, load into tmux buffer, paste + Enter
+        if targetPane and sendAfter then
+            local tmpFile = "/tmp/hs-voice-input.txt"
+            local f = io.open(tmpFile, "w")
+            if f then f:write(text) f:close() end
+            local cmd = string.format(
+                "/opt/homebrew/bin/tmux load-buffer %s && /opt/homebrew/bin/tmux paste-buffer -t '%s' && /opt/homebrew/bin/tmux send-keys -t '%s' Enter",
+                tmpFile, targetPane, targetPane
+            )
+            hs.execute(cmd)
+            if prev then hs.pasteboard.setContents(prev) end
+            log("sent via tmux: " .. targetPane)
+            setMode(nil)
+            return
+        end
+
+        -- Non-TTY paste: focus target window and paste
+        local function doPaste()
+            hs.eventtap.keyStroke({"cmd"}, "v")
+            if sendAfter then
+                safeTimer(0.15, function()
+                    hs.eventtap.keyStroke({}, "return")
+                    if prev then hs.pasteboard.setContents(prev) end
+                    setMode(nil)
+                end)
+            else
+                safeTimer(0.05, function()
+                    hs.eventtap.keyStrokes(" ")
+                    if prev then hs.pasteboard.setContents(prev) end
+                    setMode(nil)
+                end)
+            end
+        end
+        if targetWin then
+            targetWin:focus()
+            safeTimer(0.15, doPaste)
+        else
+            doPaste()
+        end
+    end
+
     local function proceed()
         if not targetPane and not targetTTY then setIndicator("..") end
         safeTimer(0.15, function()
@@ -201,109 +263,83 @@ local function stopAndTranscribe()
             end
             f:close()
 
-            whisperTask = hs.task.new(WHISPER, function(code, stdout, stderr)
-                local ok, err = pcall(function()
-                    whisperTask = nil
-                    if whisperTimeout then whisperTimeout:stop() whisperTimeout = nil end
-                    if code ~= 0 then
-                        log("WARN: whisper exited with code " .. tostring(code))
-                        setIndicator(nil)
-                        setMode(nil)
-                        hs.alert.show("Transcription failed")
-                        return
-                    end
-
-                    local text = ""
-                    for line in stdout:gmatch("[^\r\n]+") do
-                        local c = line:match("%]%s*(.+)") or line
-                        if c:match("%S") then
-                            if text ~= "" then text = text .. " " end
-                            text = text .. c:match("^%s*(.-)%s*$")
-                        end
-                    end
-                    text = text:gsub("%[.-%]", ""):gsub("%(.-%)", ""):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
-                    text = applySubs(text)
-
-                    if text == "" then
-                        setIndicator(nil)
-                        setMode(nil)
-                        hs.alert.show("No speech detected")
-                        return
-                    end
-
-                    log("transcribed: " .. text:sub(1, 80))
-
-                    lastTranscription = text
-                    local lf = io.open(LAST_TXT, "w")
-                    if lf then lf:write(text) lf:close() end
-
-                    setIndicator(nil)
-
-                    local prev = hs.pasteboard.getContents()
-                    hs.pasteboard.setContents(text)
-
-                    -- tmux pane: write to temp file, load into tmux buffer, paste + Enter
-                    -- tmux send-keys Enter sends \r → key.return → Claude Code submits
-                    if targetPane and sendAfter then
-                        local tmpFile = "/tmp/hs-voice-input.txt"
-                        local f = io.open(tmpFile, "w")
-                        if f then f:write(text) f:close() end
-                        local cmd = string.format(
-                            "/opt/homebrew/bin/tmux load-buffer %s && /opt/homebrew/bin/tmux paste-buffer -t '%s' && /opt/homebrew/bin/tmux send-keys -t '%s' Enter",
-                            tmpFile, targetPane, targetPane
-                        )
-                        hs.execute(cmd)
-                        if prev then hs.pasteboard.setContents(prev) end
-                        log("sent via tmux: " .. targetPane)
-                        setMode(nil)
-                        return
-                    end
-
-                    -- Non-TTY paste: focus target window and paste
-                    local function doPaste()
-                        hs.eventtap.keyStroke({"cmd"}, "v")
-                        if sendAfter then
-                            safeTimer(0.15, function()
-                                hs.eventtap.keyStroke({}, "return")
-                                if prev then hs.pasteboard.setContents(prev) end
-                                setMode(nil)
-                            end)
-                        else
-                            safeTimer(0.05, function()
-                                hs.eventtap.keyStrokes(" ")
-                                if prev then hs.pasteboard.setContents(prev) end
-                                setMode(nil)
-                            end)
-                        end
-                    end
-                    if targetWin then
-                        targetWin:focus()
-                        safeTimer(0.15, doPaste)
-                    else
-                        doPaste()
-                    end
-                end)
-                if not ok then
-                    log("ERROR in whisper callback: " .. tostring(err))
+            if currentModel == MODEL_API then
+                -- OpenAI Whisper API
+                local kf = io.open(OPENAI_KEY_FILE, "r")
+                if not kf then
                     setIndicator(nil)
                     setMode(nil)
-                    hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
+                    hs.alert.show("No OpenAI API key")
+                    return
                 end
-            end, {"-m", currentModel, "-f", WAV, "--no-prints", "-nt"})
-            whisperTask:start()
+                local apiKey = kf:read("*a"):match("^%s*(.-)%s*$")
+                kf:close()
 
-            whisperTimeout = safeTimer(15, function()
-                if whisperTask then
-                    log("WARN: whisper timed out after 15s — killing")
-                    whisperTask:terminate()
-                    whisperTask = nil
-                    asyncPkill("whisper-cli.*hs-voice")
-                    setIndicator(nil)
-                    setMode(nil)
-                    hs.alert.show("Transcription timed out")
-                end
-                whisperTimeout = nil
-            end)
+                whisperTask = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+                    local ok, err = pcall(function()
+                        whisperTask = nil
+                        if code ~= 0 then
+                            log("WARN: API request failed: " .. (stderr or ""):sub(1, 200))
+                            setIndicator(nil)
+                            setMode(nil)
+                            hs.alert.show("API transcription failed")
+                            return
+                        end
+                        local text = ""
+                        local json = hs.json.decode(stdout)
+                        if json and json.text then
+                            text = json.text:match("^%s*(.-)%s*$") or ""
+                        end
+                        deliver(text)
+                    end)
+                    if not ok then
+                        log("ERROR in API callback: " .. tostring(err))
+                        setIndicator(nil)
+                        setMode(nil)
+                        hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
+                    end
+                end, {
+                    "-s", "-X", "POST",
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    "-H", "Authorization: Bearer " .. apiKey,
+                    "-F", "file=@" .. WAV,
+                    "-F", "model=whisper-1",
+                    "-F", "response_format=verbose_json",
+                    "-F", "language=en",
+                })
+                whisperTask:start()
+            else
+                -- Local whisper.cpp
+                whisperTask = hs.task.new(WHISPER, function(code, stdout, stderr)
+                    local ok, err = pcall(function()
+                        whisperTask = nil
+                        if code ~= 0 then
+                            log("WARN: whisper exited with code " .. tostring(code))
+                            setIndicator(nil)
+                            setMode(nil)
+                            hs.alert.show("Transcription failed")
+                            return
+                        end
+                        local text = ""
+                        for line in stdout:gmatch("[^\r\n]+") do
+                            local c = line:match("%]%s*(.+)") or line
+                            if c:match("%S") then
+                                if text ~= "" then text = text .. " " end
+                                text = text .. c:match("^%s*(.-)%s*$")
+                            end
+                        end
+                        text = text:gsub("%[.-%]", ""):gsub("%(.-%)", ""):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+                        deliver(text)
+                    end)
+                    if not ok then
+                        log("ERROR in whisper callback: " .. tostring(err))
+                        setIndicator(nil)
+                        setMode(nil)
+                        hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
+                    end
+                end, {"-m", currentModel, "-f", WAV, "--no-prints", "-nt"})
+                whisperTask:start()
+            end
         end)
     end
 
@@ -417,12 +453,13 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
         end
     end
 
-    -- Opt+/ ' ] = switch model and start recording (release Opt to stop)
+    -- Opt+/ ' ] \ = switch model and start recording (release Opt to stop)
     if flags.alt and not flags.cmd and not flags.shift and not flags.ctrl and mode == nil then
         local m, label = nil, nil
         if     kc == 44 then m, label = MODEL_SMALL,  "Small"
         elseif kc == 39 then m, label = MODEL_MEDIUM, "Medium"
         elseif kc == 30 then m, label = MODEL_TURBO,  "Turbo"
+        elseif kc == 42 then m, label = MODEL_API,    "API"
         end
         if m then
             lastOptUp = 0  -- prevent Option release from double-tap triggering
@@ -443,7 +480,7 @@ end)
 clickBlock:start()
 
 -- Keep-alive + stuck state recovery
-local STUCK_TIMEOUT = 20
+local STUCK_TIMEOUT = 120
 local keepAliveCount = 0
 local function keepAliveTick()
     keepAliveCount = keepAliveCount + 1
