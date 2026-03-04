@@ -174,14 +174,15 @@ local function getTerminalTTY(win)
     return nil
 end
 
--- If the given TTY belongs to a tmux pane, return the pane target (e.g. "claude:0.0").
+-- If the given TTY is a tmux client, return the session name as a send-keys target.
+-- Terminal.app's TTY matches the tmux CLIENT tty, not the pane tty.
 local function getTmuxPane(tty)
     if not tty then return nil end
-    local ok, out = hs.execute("tmux list-panes -a -F '#{pane_tty} #{session_name}:#{window_index}.#{pane_index}' 2>/dev/null")
+    local ok, out = hs.execute("tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null")
     if not ok or not out or out == "" then return nil end
     for line in out:gmatch("[^\n]+") do
-        local paneTTY, paneTarget = line:match("^(/dev/%S+)%s+(%S+)$")
-        if paneTTY == tty then return paneTarget end
+        local clientTTY, session = line:match("^(/dev/%S+)%s+(%S+)$")
+        if clientTTY == tty then return session end
     end
     return nil
 end
