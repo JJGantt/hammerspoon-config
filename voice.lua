@@ -205,7 +205,7 @@ local function startRecording(model)
     setMode("recording")
     showBorder({red=0.9, green=0.1, blue=0.1, alpha=0.85})
     ding("Glass")
-    setIndicator(">")
+    if not targetTTY then setIndicator(">") end
     soxTask = hs.task.new(SOX, function() end,
         {"-d", "-r", "16000", "-c", "1", "-b", "16", WAV})
     soxTask:start()
@@ -219,7 +219,7 @@ local function stopAndTranscribe()
     ding("Purr")
 
     local function proceed()
-        setIndicator("..")
+        if not targetTTY then setIndicator("..") end
         safeTimer(0.15, function()
             local f = io.open(WAV, "r")
             if not f then
