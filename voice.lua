@@ -116,6 +116,7 @@ local whisperTimeout = nil
 local activeTimers = {}
 local sendAfter = false
 local targetWin = nil
+local targetTTY = nil   -- TTY path if target is a Terminal tab; nil otherwise
 local currentModel = MODEL
 
 local function safeTimer(delay, fn)
@@ -160,6 +161,19 @@ local function killSox()
     asyncPkill("sox.*hs-voice")
 end
 
+-- If the focused window is a Terminal tab, return its TTY device path.
+-- This lets us inject text directly without stealing focus.
+local function getTerminalTTY(win)
+    if not win then return nil end
+    local app = win:application()
+    if not app or app:bundleID() ~= "com.apple.Terminal" then return nil end
+    local ok, tty = hs.osascript.applescript(
+        'tell application "Terminal" to return tty of selected tab of front window'
+    )
+    if ok and tty and tty:match("^/dev/") then return tty end
+    return nil
+end
+
 local function reset()
     killSox()
     if whisperTask then whisperTask:terminate() whisperTask = nil end
@@ -167,6 +181,7 @@ local function reset()
     asyncPkill("whisper-cli.*hs-voice")
     setIndicator(nil)
     targetWin = nil
+    targetTTY = nil
     cleanTimers()
     setMode(nil)
 end
@@ -184,6 +199,7 @@ local function startRecording(model)
     log("startRecording model=" .. modelLabel(currentModel))
     reset()
     targetWin = hs.window.focusedWindow()
+    targetTTY = getTerminalTTY(targetWin)
     os.remove(WAV)
     recordingStartedAt = hs.timer.secondsSinceEpoch()
     setMode("recording")
@@ -251,10 +267,34 @@ local function stopAndTranscribe()
                     if lf then lf:write(text) lf:close() end
 
                     setIndicator(nil)
+
+                    -- Terminal tab: inject directly via TTY — no focus steal
+                    if targetTTY and sendAfter then
+                        local escaped = text:gsub('\\', '\\\\'):gsub('"', '\\"')
+                        local ok = hs.osascript.applescript(string.format([[
+                            tell application "Terminal"
+                                repeat with w in windows
+                                    repeat with t in tabs of w
+                                        if (tty of t) is "%s" then
+                                            do script "%s" in t
+                                            return
+                                        end if
+                                    end repeat
+                                end repeat
+                            end tell
+                        ]], targetTTY, escaped))
+                        if ok then
+                            log("sent via TTY: " .. targetTTY)
+                            setMode(nil)
+                            return
+                        end
+                        log("WARN: TTY injection failed, falling back to paste")
+                    end
+
+                    -- Paste fallback: focus the window and paste
                     local prev = hs.pasteboard.getContents()
                     hs.pasteboard.setContents(text)
-
-                    safeTimer(0.05, function()
+                    local function doPaste()
                         hs.eventtap.keyStroke({"cmd"}, "v")
                         if sendAfter then
                             safeTimer(0.15, function()
@@ -269,7 +309,13 @@ local function stopAndTranscribe()
                                 setMode(nil)
                             end)
                         end
-                    end)
+                    end
+                    if targetWin then
+                        targetWin:focus()
+                        safeTimer(0.15, doPaste)
+                    else
+                        doPaste()
+                    end
                 end)
                 if not ok then
                     log("ERROR in whisper callback: " .. tostring(err))
@@ -295,12 +341,7 @@ local function stopAndTranscribe()
         end)
     end
 
-    if targetWin then
-        targetWin:focus()
-        safeTimer(0.15, proceed)
-    else
-        proceed()
-    end
+    proceed()
 end
 
 -- Caps Lock tracker — keycode 57 fires twice per press (down+up), debounce
