@@ -271,34 +271,34 @@ local function stopAndTranscribe()
                     local prev = hs.pasteboard.getContents()
                     hs.pasteboard.setContents(text)
 
-                    -- TTY path: select exact tab, briefly focus, paste+Return, restore focus
+                    -- TTY path: inject text via do script + send Return via System Events
+                    -- No activate = no focus steal (hopefully)
                     if targetTTY and sendAfter then
-                        local restoreWin = hs.window.focusedWindow()
-                        -- Select the right tab and activate Terminal
+                        local escaped = text:gsub('\\', '\\\\'):gsub('"', '\\"')
                         hs.osascript.applescript(string.format([[
                             tell application "Terminal"
                                 repeat with w in windows
                                     repeat with t in tabs of w
                                         if (tty of t) is "%s" then
+                                            do script "%s" in t
                                             set selected of t to true
-                                            activate
                                             return
                                         end if
                                     end repeat
                                 end repeat
                             end tell
-                        ]], targetTTY))
-                        safeTimer(0.15, function()
-                            hs.eventtap.keyStroke({"cmd"}, "v")
-                            safeTimer(0.1, function()
-                                hs.eventtap.keyStroke({}, "return")
-                                safeTimer(0.1, function()
-                                    if prev then hs.pasteboard.setContents(prev) end
-                                    if restoreWin then restoreWin:focus() end
-                                    log("sent via TTY tab: " .. targetTTY)
-                                    setMode(nil)
-                                end)
-                            end)
+                        ]], targetTTY, escaped))
+                        safeTimer(0.2, function()
+                            hs.osascript.applescript([[
+                                tell application "System Events"
+                                    tell process "Terminal"
+                                        key code 36
+                                    end tell
+                                end tell
+                            ]])
+                            if prev then hs.pasteboard.setContents(prev) end
+                            log("sent via TTY + System Events Return: " .. targetTTY)
+                            setMode(nil)
                         end)
                         return
                     end
