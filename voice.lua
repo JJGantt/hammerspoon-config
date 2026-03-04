@@ -66,49 +66,6 @@ local function modelLabel(m)
     else return m:match("ggml%-(.-)%.bin") or "?" end
 end
 
--- Caps Lock mode indicator: thin blue border on every screen, across all Spaces
-local capslockBorders = {}
-local function showCapslockBorder(show)
-    for _, b in ipairs(capslockBorders) do b:delete() end
-    capslockBorders = {}
-    if not show then return end
-    for _, screen in ipairs(hs.screen.allScreens()) do
-        local f = screen:fullFrame()
-        local b = hs.canvas.new(f)
-        b[1] = {
-            type        = "rectangle",
-            action      = "stroke",
-            strokeColor = {red=0.3, green=0.65, blue=1.0, alpha=0.5},
-            strokeWidth = 3,
-            frame       = {x=1.5, y=1.5, w=f.w-3, h=f.h-3},
-        }
-        b:level(hs.canvas.windowLevels.overlay)
-        b:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces | hs.canvas.windowBehaviors.stationary)
-        b:show()
-        capslockBorders[#capslockBorders + 1] = b
-    end
-end
-
--- Screen border highlight: red=recording, amber=transcribing, nil=off
-local recordBorder = nil
-local function showBorder(color)
-    if recordBorder then recordBorder:delete() recordBorder = nil end
-    if not color then return end
-    local win = targetWin or hs.window.focusedWindow()
-    if not win then return end
-    local f = win:frame()
-    recordBorder = hs.canvas.new(f)
-    recordBorder[1] = {
-        type         = "rectangle",
-        action       = "stroke",
-        strokeColor  = color,
-        strokeWidth  = 6,
-        frame        = {x = 0, y = 0, w = f.w, h = f.h},
-    }
-    recordBorder:level(hs.canvas.windowLevels.overlay)
-    recordBorder:show()
-end
-
 -- IMPORTANT: all hs.task/timer/watcher refs stored at module scope to prevent GC
 local soxTask = nil
 local whisperTask = nil
@@ -138,7 +95,6 @@ local function setMode(newMode)
     log(string.format("mode: %s -> %s", tostring(mode), tostring(newMode)))
     mode = newMode
     modeChangedAt = hs.timer.secondsSinceEpoch()
-    if newMode == nil then showBorder(nil) end
 end
 
 local function setIndicator(str)
@@ -180,7 +136,7 @@ end
 -- Terminal.app's TTY matches the tmux CLIENT tty, not the pane tty.
 local function getTmuxPane(tty)
     if not tty then return nil end
-    local output, status = hs.execute("tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null")
+    local output, status = hs.execute("/opt/homebrew/bin/tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null")
     if not status or not output or output == "" then return nil end
     for line in output:gmatch("[^\n]+") do
         local clientTTY, session = line:match("^(/dev/%S+)%s+(%S+)$")
@@ -215,14 +171,11 @@ local function startRecording(model)
     log("startRecording model=" .. modelLabel(currentModel))
     reset()
     targetWin = hs.window.focusedWindow()
-    log("target win: id=" .. tostring(targetWin and targetWin:id()) .. " title=" .. tostring(targetWin and targetWin:title():sub(1,60)))
     targetTTY = getTerminalTTY(targetWin)
     targetPane = getTmuxPane(targetTTY)
-    log("target: tty=" .. tostring(targetTTY) .. " pane=" .. tostring(targetPane))
     os.remove(WAV)
     recordingStartedAt = hs.timer.secondsSinceEpoch()
     setMode("recording")
-    showBorder({red=0.9, green=0.1, blue=0.1, alpha=0.85})
     ding("Glass")
     if not targetPane and not targetTTY then setIndicator(">") end
     soxTask = hs.task.new(SOX, function() end,
@@ -234,7 +187,6 @@ local function stopAndTranscribe()
     log("stopAndTranscribe (sendAfter=" .. tostring(sendAfter) .. ")")
     killSox()
     setMode("transcribing")
-    showBorder({red=1, green=0.6, blue=0, alpha=0.85})
     ding("Purr")
 
     local function proceed()
@@ -297,7 +249,7 @@ local function stopAndTranscribe()
                         local f = io.open(tmpFile, "w")
                         if f then f:write(text) f:close() end
                         local cmd = string.format(
-                            "tmux load-buffer %s && tmux paste-buffer -t '%s' && tmux send-keys -t '%s' Enter",
+                            "/opt/homebrew/bin/tmux load-buffer %s && /opt/homebrew/bin/tmux paste-buffer -t '%s' && /opt/homebrew/bin/tmux send-keys -t '%s' Enter",
                             tmpFile, targetPane, targetPane
                         )
                         hs.execute(cmd)
@@ -368,13 +320,11 @@ local capslockTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, func
             capslockLastToggle = now
             capslockOn = not capslockOn
             log("capslockOn = " .. tostring(capslockOn))
-            showCapslockBorder(capslockOn)
         end
     end
     return false
 end)
 capslockTap:start()
-showCapslockBorder(capslockOn)  -- draw initial state on load
 
 -- Option key watcher
 local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
@@ -527,17 +477,10 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
             capslockOn = hs.eventtap.checkKeyboardModifiers().capslock == true
             log("wake: capslockOn = " .. tostring(capslockOn))
             reset()
-            showCapslockBorder(capslockOn)
         end)
     end
 end)
 wakeWatcher:start()
-
--- Redraw caps lock border if monitors change
-local screenWatcher = hs.screen.watcher.new(function()
-    showCapslockBorder(capslockOn)
-end)
-screenWatcher:start()
 
 -- Cmd+Opt+V: paste last transcription (fallback)
 hs.hotkey.bind({"cmd", "alt"}, "v", function()
