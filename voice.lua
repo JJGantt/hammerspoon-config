@@ -276,53 +276,7 @@ local function stopAndTranscribe()
             end
             f:close()
 
-            if useModel == MODEL_API then
-                -- OpenAI Whisper API
-                local kf = io.open(OPENAI_KEY_FILE, "r")
-                if not kf then
-                    setIndicator(nil)
-                    setMode(nil)
-                    hs.alert.show("No OpenAI API key")
-                    return
-                end
-                local apiKey = kf:read("*a"):match("^%s*(.-)%s*$")
-                kf:close()
-
-                whisperTask = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
-                    local ok, err = pcall(function()
-                        whisperTask = nil
-                        if code ~= 0 then
-                            log("WARN: API request failed: " .. (stderr or ""):sub(1, 200))
-                            setIndicator(nil)
-                            setMode(nil)
-                            hs.alert.show("API transcription failed")
-                            return
-                        end
-                        local text = ""
-                        local json = hs.json.decode(stdout)
-                        if json and json.text then
-                            text = json.text:match("^%s*(.-)%s*$") or ""
-                        end
-                        deliver(text)
-                    end)
-                    if not ok then
-                        log("ERROR in API callback: " .. tostring(err))
-                        setIndicator(nil)
-                        setMode(nil)
-                        hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
-                    end
-                end, {
-                    "-s", "-X", "POST",
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    "-H", "Authorization: Bearer " .. apiKey,
-                    "-F", "file=@" .. WAV,
-                    "-F", "model=whisper-1",
-                    "-F", "response_format=verbose_json",
-                    "-F", "language=en",
-                })
-                whisperTask:start()
-            else
-                -- Local whisper.cpp
+            local function runLocalWhisper()
                 whisperTask = hs.task.new(WHISPER, function(code, stdout, stderr)
                     local ok, err = pcall(function()
                         whisperTask = nil
@@ -350,8 +304,56 @@ local function stopAndTranscribe()
                         setMode(nil)
                         hs.alert.show("Voice error: " .. tostring(err):sub(1, 50))
                     end
-                end, {"-m", useModel, "-f", WAV, "--no-prints", "-nt"})
+                end, {"-m", MODEL_BASE, "-f", WAV, "--no-prints", "-nt"})
                 whisperTask:start()
+            end
+
+            if useModel == MODEL_API then
+                -- OpenAI Whisper API (falls back to local on failure)
+                local kf = io.open(OPENAI_KEY_FILE, "r")
+                if not kf then
+                    log("WARN: no API key, falling back to local")
+                    runLocalWhisper()
+                    return
+                end
+                local apiKey = kf:read("*a"):match("^%s*(.-)%s*$")
+                kf:close()
+
+                whisperTask = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+                    local ok, err = pcall(function()
+                        whisperTask = nil
+                        if code ~= 0 then
+                            log("WARN: API curl failed (code " .. tostring(code) .. "): " .. (stderr or ""):sub(1, 200))
+                            log("WARN: API stdout: " .. (stdout or ""):sub(1, 200))
+                            log("falling back to local whisper")
+                            runLocalWhisper()
+                            return
+                        end
+                        local json = hs.json.decode(stdout)
+                        if not json or not json.text then
+                            log("WARN: API returned unexpected response: " .. (stdout or ""):sub(1, 200))
+                            log("falling back to local whisper")
+                            runLocalWhisper()
+                            return
+                        end
+                        deliver(json.text:match("^%s*(.-)%s*$") or "")
+                    end)
+                    if not ok then
+                        log("ERROR in API callback: " .. tostring(err) .. " — falling back to local")
+                        runLocalWhisper()
+                    end
+                end, {
+                    "-sS", "-X", "POST",
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    "-H", "Authorization: Bearer " .. apiKey,
+                    "-F", "file=@" .. WAV,
+                    "-F", "model=whisper-1",
+                    "-F", "response_format=verbose_json",
+                    "-F", "language=en",
+                })
+                whisperTask:start()
+            else
+                runLocalWhisper()
             end
         end)
     end
