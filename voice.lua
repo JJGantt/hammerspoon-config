@@ -268,27 +268,18 @@ local function stopAndTranscribe()
 
                     setIndicator(nil)
 
-                    -- Terminal tab: inject directly via TTY — no focus steal
+                    -- Terminal tab: write directly to TTY device — no focus steal
+                    -- Must use \r (0x0d) not \n: Ink only submits on key.return (\r)
                     if targetTTY and sendAfter then
-                        local escaped = text:gsub('\\', '\\\\'):gsub('"', '\\"')
-                        local ok = hs.osascript.applescript(string.format([[
-                            tell application "Terminal"
-                                repeat with w in windows
-                                    repeat with t in tabs of w
-                                        if (tty of t) is "%s" then
-                                            do script "%s" in t
-                                            return
-                                        end if
-                                    end repeat
-                                end repeat
-                            end tell
-                        ]], targetTTY, escaped))
-                        if ok then
-                            log("sent via TTY: " .. targetTTY)
+                        local f = io.open(targetTTY, "w")
+                        if f then
+                            f:write(text .. "\r")
+                            f:close()
+                            log("sent via TTY write: " .. targetTTY)
                             setMode(nil)
                             return
                         end
-                        log("WARN: TTY injection failed, falling back to paste")
+                        log("WARN: TTY write failed, falling back to paste")
                     end
 
                     -- Paste fallback: focus the window and paste
