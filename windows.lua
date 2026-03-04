@@ -5,7 +5,7 @@
 -- Cmd+Opt+S:     save full window layout (context-aware: laptop or monitor slot)
 -- Cmd+Opt+R:     restore window layout for current context
 
-local CLAUDE_CMD = "cd ~/workspace && claude --dangerously-skip-permissions"
+local CLAUDE_CMD = os.getenv("HOME") .. "/.hammerspoon/open-claude.sh"
 local POSITION_KEY = "terminal_monitor_frame"
 
 local function hasMonitor()

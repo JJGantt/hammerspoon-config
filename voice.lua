@@ -117,6 +117,7 @@ local activeTimers = {}
 local sendAfter = false
 local targetWin = nil
 local targetTTY = nil   -- TTY path if target is a Terminal tab; nil otherwise
+local targetPane = nil  -- tmux pane target (e.g. "claude:0.0") if inside tmux; nil otherwise
 local currentModel = MODEL
 
 local function safeTimer(delay, fn)
@@ -162,7 +163,6 @@ local function killSox()
 end
 
 -- If the focused window is a Terminal tab, return its TTY device path.
--- This lets us inject text directly without stealing focus.
 local function getTerminalTTY(win)
     if not win then return nil end
     local app = win:application()
@@ -174,6 +174,18 @@ local function getTerminalTTY(win)
     return nil
 end
 
+-- If the given TTY belongs to a tmux pane, return the pane target (e.g. "claude:0.0").
+local function getTmuxPane(tty)
+    if not tty then return nil end
+    local ok, out = hs.execute("tmux list-panes -a -F '#{pane_tty} #{session_name}:#{window_index}.#{pane_index}' 2>/dev/null")
+    if not ok or not out or out == "" then return nil end
+    for line in out:gmatch("[^\n]+") do
+        local paneTTY, paneTarget = line:match("^(/dev/%S+)%s+(%S+)$")
+        if paneTTY == tty then return paneTarget end
+    end
+    return nil
+end
+
 local function reset()
     killSox()
     if whisperTask then whisperTask:terminate() whisperTask = nil end
@@ -182,6 +194,7 @@ local function reset()
     setIndicator(nil)
     targetWin = nil
     targetTTY = nil
+    targetPane = nil
     cleanTimers()
     setMode(nil)
 end
@@ -200,12 +213,13 @@ local function startRecording(model)
     reset()
     targetWin = hs.window.focusedWindow()
     targetTTY = getTerminalTTY(targetWin)
+    targetPane = getTmuxPane(targetTTY)
     os.remove(WAV)
     recordingStartedAt = hs.timer.secondsSinceEpoch()
     setMode("recording")
     showBorder({red=0.9, green=0.1, blue=0.1, alpha=0.85})
     ding("Glass")
-    if not targetTTY then setIndicator(">") end
+    if not targetPane and not targetTTY then setIndicator(">") end
     soxTask = hs.task.new(SOX, function() end,
         {"-d", "-r", "16000", "-c", "1", "-b", "16", WAV})
     soxTask:start()
@@ -219,7 +233,7 @@ local function stopAndTranscribe()
     ding("Purr")
 
     local function proceed()
-        if not targetTTY then setIndicator("..") end
+        if not targetPane and not targetTTY then setIndicator("..") end
         safeTimer(0.15, function()
             local f = io.open(WAV, "r")
             if not f then
@@ -271,35 +285,20 @@ local function stopAndTranscribe()
                     local prev = hs.pasteboard.getContents()
                     hs.pasteboard.setContents(text)
 
-                    -- TTY path: inject text via do script + send Return via System Events
-                    -- No activate = no focus steal (hopefully)
-                    if targetTTY and sendAfter then
-                        local escaped = text:gsub('\\', '\\\\'):gsub('"', '\\"')
-                        hs.osascript.applescript(string.format([[
-                            tell application "Terminal"
-                                repeat with w in windows
-                                    repeat with t in tabs of w
-                                        if (tty of t) is "%s" then
-                                            do script "%s" in t
-                                            set selected of t to true
-                                            return
-                                        end if
-                                    end repeat
-                                end repeat
-                            end tell
-                        ]], targetTTY, escaped))
-                        safeTimer(0.2, function()
-                            hs.osascript.applescript([[
-                                tell application "System Events"
-                                    tell process "Terminal"
-                                        key code 36
-                                    end tell
-                                end tell
-                            ]])
-                            if prev then hs.pasteboard.setContents(prev) end
-                            log("sent via TTY + System Events Return: " .. targetTTY)
-                            setMode(nil)
-                        end)
+                    -- tmux pane: write to temp file, load into tmux buffer, paste + Enter
+                    -- tmux send-keys Enter sends \r → key.return → Claude Code submits
+                    if targetPane and sendAfter then
+                        local tmpFile = "/tmp/hs-voice-input.txt"
+                        local f = io.open(tmpFile, "w")
+                        if f then f:write(text) f:close() end
+                        local cmd = string.format(
+                            "tmux load-buffer %s && tmux paste-buffer -t '%s' && tmux send-keys -t '%s' Enter",
+                            tmpFile, targetPane, targetPane
+                        )
+                        hs.execute(cmd)
+                        if prev then hs.pasteboard.setContents(prev) end
+                        log("sent via tmux: " .. targetPane)
+                        setMode(nil)
                         return
                     end
 
