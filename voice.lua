@@ -367,13 +367,12 @@ end
 
 -- Caps Lock tracker — keycode 57 fires twice per press (down+up), debounce
 -- so only the first event per physical press actually toggles
-local capslockLastToggle = 0
 local capslockTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
     if event:getKeyCode() == 57 then
-        local now = hs.timer.secondsSinceEpoch()
-        if (now - capslockLastToggle) > 0.1 then
-            capslockLastToggle = now
-            capslockOn = not capslockOn
+        -- Read actual hardware state instead of toggling to prevent drift
+        local actual = hs.eventtap.checkKeyboardModifiers().capslock == true
+        if actual ~= capslockOn then
+            capslockOn = actual
             log("capslockOn = " .. tostring(capslockOn))
         end
     end
