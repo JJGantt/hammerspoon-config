@@ -88,7 +88,6 @@ end
 
 local function killSox()
     if soxTask then soxTask:terminate() soxTask = nil end
-    asyncPkill("sox.*hs-voice")
 end
 
 -- Get tmux pane for a Terminal.app window
@@ -239,21 +238,17 @@ local function stopAndTranscribe()
         end
 
         -- Generic: focus target window and paste
+        log(string.format("deliver: generic paste sendAfter=%s win=%s clipLen=%d",
+            tostring(sendAfter), tostring(targetWin and targetWin:title() or "nil"), #(hs.pasteboard.getContents() or "")))
         local function doPaste()
+            log(string.format("doPaste: sendAfter=%s", tostring(sendAfter)))
             hs.eventtap.keyStroke({"cmd"}, "v")
             if sendAfter then
-                safeTimer(0.15, function()
-                    hs.eventtap.keyStroke({}, "return")
-                    if prev then hs.pasteboard.setContents(prev) end
-                    setMode(nil)
-                end)
+                hs.eventtap.keyStroke({}, "return")
             else
-                safeTimer(0.05, function()
-                    hs.eventtap.keyStrokes(" ")
-                    if prev then hs.pasteboard.setContents(prev) end
-                    setMode(nil)
-                end)
+                hs.eventtap.keyStrokes(" ")
             end
+            setMode(nil)
         end
         if targetWin then
             targetWin:focus()
