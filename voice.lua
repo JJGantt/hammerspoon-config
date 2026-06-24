@@ -94,6 +94,11 @@ local function cleanTimers()
     activeTimers = live
 end
 
+-- Module-scope so the GC can't reap these mid-flight: an UNSTORED hs.task can be collected before it
+-- sends the signal (the documented "works once then dies" bug), which silently breaks the push-to-talk
+-- mute and lets the ESP capture what you're dictating. Storing them guarantees the signal actually fires.
+local pttMuteTasks = {}
+
 local function setMode(newMode)
     log(string.format("mode: %s -> %s", tostring(mode), tostring(newMode)))
     mode = newMode
@@ -102,8 +107,10 @@ local function setMode(newMode)
     -- wake-free) so they don't fight for the mic or execute what you're dictating to Claude. SIGUSR1 =
     -- pause + release the mic; SIGUSR2 = resume. Sent to both; whichever isn't running is a no-op.
     local sig = (newMode == "recording") and "-USR1" or "-USR2"
-    hs.task.new("/usr/bin/pkill", nil, {sig, "-f", "listener.py"}):start()
-    hs.task.new("/usr/bin/pkill", nil, {sig, "-f", "wakefree.py"}):start()
+    pttMuteTasks.listener = hs.task.new("/usr/bin/pkill", nil, {sig, "-f", "listener.py"})
+    pttMuteTasks.listener:start()
+    pttMuteTasks.wakefree = hs.task.new("/usr/bin/pkill", nil, {sig, "-f", "wakefree.py"})
+    pttMuteTasks.wakefree:start()
 end
 
 local function asyncPkill(pattern)
