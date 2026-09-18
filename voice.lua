@@ -25,20 +25,8 @@ local TMUX = "/opt/homebrew/bin/tmux"
 local AI_TERMINAL_TAB_FILE = "/tmp/ai-terminal-active-tab"
 local AI_TERMINAL_BUNDLE = "com.github.Electron"
 
--- Hands-free VAD auto-end (silero). See voice-conversation-design.md.
-local VAD_PYTHON = os.getenv("HOME") .. "/voice/mac/.venv-kokoro/bin/python"
-local VAD_SCRIPT = os.getenv("HOME") .. "/scripts/vad_listen.py"
-local BASELINE_FILE = os.getenv("HOME") .. "/.hammerspoon/voice-baseline"
-local VAD_BASELINE = 5.0       -- seconds of non-speech (after speech) before auto-ending
-do  -- restore persisted baseline (set via Cmd+Opt+number)
-    local f = io.open(BASELINE_FILE, "r")
-    if f then
-        local v = tonumber(f:read("*a") or "")
-        f:close()
-        if v and v > 0 then VAD_BASELINE = v end
-    end
-end
-local VAD_MAX_INITIAL = 20.0   -- give up (NOSPEECH) if no speech at all within this window
+-- A recording ends only when you end it: Enter to send, Option-release to paste, Escape to cancel.
+-- Silence never stops it, however long the pause.
 local LOG_FILE = os.getenv("HOME") .. "/Library/Logs/hs-voice.log"
 local hslog = hs.logger.new("voice", "info")
 
@@ -74,11 +62,9 @@ local recordingStartedAt = 0
 
 local soxTask = nil
 local whisperTask = nil
-local vadTask = nil
-local autoSendOnStop = false
 local activeTimers = {}
-local stopAndTranscribe  -- forward declaration: referenced by startRecording's VAD callback,
-                         -- but defined later in the file (Lua locals aren't visible before declaration)
+local stopAndTranscribe  -- forward declaration: assigned further down, so the local exists for
+                         -- callers above it (Lua locals aren't visible before declaration)
 
 local function safeTimer(delay, fn)
     local t = hs.timer.doAfter(delay, function() fn() end)
@@ -123,10 +109,6 @@ local function killSox()
     end
 end
 
-local function killVad()
-    if vadTask then vadTask:terminate() vadTask = nil end
-end
-
 -- Get tmux pane for a Terminal.app window
 local function getTerminalTTY(win)
     if not win then return nil end
@@ -153,7 +135,6 @@ end
 
 local function reset()
     killSox()
-    killVad()
     if whisperTask then whisperTask:terminate() whisperTask = nil end
     asyncPkill("whisper-cli.*hs-voice")
     targetWin = nil
@@ -168,8 +149,8 @@ local function ding(name)
     if s then s:play() end
 end
 
-local function startRecording(autoStop, autoSend)
-    log("startRecording" .. (autoStop and " (auto-stop)" or ""))
+local function startRecording()
+    log("startRecording")
     reset()
     targetWin = hs.window.focusedWindow()
 
@@ -199,33 +180,6 @@ local function startRecording(autoStop, autoSend)
         end
     end, {"-q", "-d", "-r", "16000", "-c", "1", "-b", "16", WAV})
     soxTask:start()
-
-    -- Parallel VAD listener: ends the recording automatically after VAD_BASELINE
-    -- seconds of non-speech (or cancels if no speech at all). Reads the mic
-    -- independently of sox.
-    if autoStop then
-        autoSendOnStop = autoSend and true or false
-        vadTask = hs.task.new(VAD_PYTHON, function(code, stdout, stderr)
-            local out = stdout or ""
-            local decision = out:match("STOP") and "STOP" or (out:match("NOSPEECH") and "NOSPEECH" or nil)
-            safeTimer(0, function()
-                vadTask = nil
-                if mode ~= "recording" then return end  -- already stopped/cancelled manually
-                if decision == "STOP" then
-                    log("vad: auto-stop after baseline silence (send=" .. tostring(autoSendOnStop) .. ")")
-                    sendAfter = autoSendOnStop
-                    stopAndTranscribe()
-                elseif decision == "NOSPEECH" then
-                    log("vad: no speech detected — cancelling")
-                    reset()
-                    hs.alert.show("No speech")
-                else
-                    log("vad: exited without decision (code=" .. tostring(code) .. ")")
-                end
-            end)
-        end, {VAD_SCRIPT, "--baseline", tostring(VAD_BASELINE), "--max-initial", tostring(VAD_MAX_INITIAL)})
-        vadTask:start()
-    end
 end
 
 local function saveRecording()
@@ -249,7 +203,6 @@ end
 function stopAndTranscribe()  -- assigns to the forward-declared local above
     log("stopAndTranscribe (sendAfter=" .. tostring(sendAfter) .. ")")
     killSox()
-    killVad()
     saveRecording()
     local recordingSecs = hs.timer.secondsSinceEpoch() - recordingStartedAt
     local useAPI = recordingSecs >= ADAPTIVE_THRESHOLD
@@ -460,7 +413,7 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
         lastOptUp = 0
-        safeTimer(0, function() startRecording(true, true) end)  -- manual: auto-end on silence, then send (Enter)
+        safeTimer(0, function() startRecording() end)
     else
         lastOptUp = now
     end
@@ -575,15 +528,3 @@ function injectVoiceText(text)
     end)
 end
 
--- Cmd+Opt+1..9 set the auto-end pause to that many seconds; Cmd+Opt+0 = 10s. Persisted.
-local function setBaseline(secs)
-    VAD_BASELINE = secs
-    local f = io.open(BASELINE_FILE, "w")
-    if f then f:write(tostring(secs)); f:close() end
-    log("baseline set to " .. secs .. "s")
-    hs.alert.show("⏱️ Auto-end pause: " .. secs .. "s")
-end
-for d = 1, 9 do
-    hs.hotkey.bind({"cmd", "alt"}, tostring(d), function() setBaseline(d) end)
-end
-hs.hotkey.bind({"cmd", "alt"}, "0", function() setBaseline(10) end)
