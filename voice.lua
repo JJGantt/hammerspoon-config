@@ -212,6 +212,9 @@ function stopAndTranscribe()  -- assigns to the forward-declared local above
 
     local function deliver(text)
         text = applySubs(text)
+        -- Whisper writes "Thank you." for a recording with no speech in it. On its own it is never
+        -- dictation, so it is dropped like silence rather than typed into a session.
+        if text:lower():gsub("[^%a]", "") == "thankyou" then text = "" end
         if text == "" then
             setMode(nil)
             hs.alert.show("No speech detected")
