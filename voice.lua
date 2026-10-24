@@ -61,6 +61,20 @@ local targetPane = nil   -- tmux pane target
 local recordingStartedAt = 0
 
 local soxTask = nil
+
+-- Always record from the Mac's own microphone, never the default input. Connected AirPods become the
+-- default, and opening their mic drops the whole Bluetooth link into the hands-free profile: narrowband
+-- call-quality audio for Whisper, a second of switching that clips the first words, and degraded
+-- playback for as long as the mic is open. Pinned here, the AirPods stay on output only.
+local function soxArgs()
+    for _, d in ipairs(hs.audiodevice.allInputDevices()) do
+        if d:transportType() == "Built-in" then
+            return {"-q", "-t", "coreaudio", d:name(), "-r", "16000", "-c", "1", "-b", "16", WAV}
+        end
+    end
+    log("WARN: no built-in microphone found — recording from the default input")
+    return {"-q", "-d", "-r", "16000", "-c", "1", "-b", "16", WAV}
+end
 local whisperTask = nil
 local activeTimers = {}
 local stopAndTranscribe  -- forward declaration: assigned further down, so the local exists for
@@ -178,7 +192,7 @@ local function startRecording()
             log("WARN: sox exited early (code=" .. tostring(code) .. ") — recording lost audio after this point")
             hs.alert.show("⚠️ Recording device dropped")
         end
-    end, {"-q", "-d", "-r", "16000", "-c", "1", "-b", "16", WAV})
+    end, soxArgs())
     soxTask:start()
 end
 
