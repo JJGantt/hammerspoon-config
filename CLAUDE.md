@@ -11,7 +11,7 @@ loaded by `init.lua` with `require("module_name")`.
 ## Rules
 - Every `hs.task`, `hs.timer`, `hs.eventtap`, and `hs.caffeinate.watcher`
   MUST be stored in a module-scope variable. Lua's GC will kill orphaned
-  objects and silently break things. This was the root cause of the
-  "works once then dies after idle" bug.
+  objects and silently break things (symptom: a feature works once, then
+  dies after idle).
 - Keep modules self-contained. Each module starts its own taps/timers
   and doesn't depend on other modules.
