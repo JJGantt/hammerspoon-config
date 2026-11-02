@@ -25,7 +25,7 @@ local STATES = {
   working   = { label = "Working\u{2026}", color = { red = 1.00, green = 0.72, blue = 0.20 } }, -- amber
   done      = { label = "Done",       color = { red = 0.30, green = 0.85, blue = 0.45 } },  -- green
   error     = { label = "Error",      color = { red = 1.00, green = 0.35, blue = 0.35 } },  -- red
-  locked    = { label = "Hearing you", color = { red = 0.15, green = 0.90, blue = 0.55 } }, -- vivid green: speaker-ID confirmed it's Jared, live
+  locked    = { label = "Hearing you", color = { red = 0.15, green = 0.90, blue = 0.55 } }, -- vivid green: speaker-ID confirmed the enrolled speaker, live
 }
 
 local function hudFrame()
