@@ -10,3 +10,6 @@ require("voicelistener")
 hs.hotkey.bind({"ctrl", "alt", "cmd"}, "R", hs.reload)
 
 hs.alert.show("Hammerspoon loaded")
+
+-- Menu bar control for the external-display filter (screen-filter repo).
+require("screenfilter")
