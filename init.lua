@@ -5,6 +5,8 @@ require("windows")
 require("topbar")
 require("voicehud")
 require("voicelistener")
+-- Reading a Claude session's tab on screen marks its reply read everywhere (session-read.lua).
+require("session-read").start()
 
 -- Ctrl+Alt+Cmd+R to reload
 hs.hotkey.bind({"ctrl", "alt", "cmd"}, "R", hs.reload)
