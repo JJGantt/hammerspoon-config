@@ -2,7 +2,6 @@
 require("hs.ipc")  -- enables the `hs` CLI message port (used by speak.sh → conversationListen)
 require("voice")
 require("windows")
-require("topbar")
 require("voicehud")
 require("voicelistener")
 -- Reading a Claude session's tab on screen marks its reply read everywhere (session-read.lua).
