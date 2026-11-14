@@ -26,7 +26,7 @@ local function run(...)
   if not M.task:start() then print("ERROR screenfilter: could not start " .. CLI) end
 end
 
-local function refreshIcon()
+function M.refreshIcon()
   local s = settings()
   M.menubar:setTitle(s.mode == "off" and "○" or "◐")
 end
@@ -54,9 +54,9 @@ end
 M.menubar = hs.menubar.new()
 M.menubar:setTooltip("Screen filter")
 M.menubar:setMenu(buildMenu)
-refreshIcon()
+M.refreshIcon()
 
 -- The icon follows the mode whoever changes it (this menu, the CLI, a Claude session).
-M.watcher = hs.pathwatcher.new(CONFIG_DIR, refreshIcon):start()
+M.watcher = hs.pathwatcher.new(CONFIG_DIR, function() M.refreshIcon() end):start()
 
 return M
