@@ -38,16 +38,17 @@ local function buildMenu()
     { title = "Always on", checked = s.mode == "on", fn = function() run("on") end },
     { title = "Off", checked = s.mode == "off", fn = function() run("off") end },
     { title = "-" },
-    { title = "Warmth", disabled = true },
   }
-  for _, w in ipairs(WARMTH) do
-    table.insert(menu, { title = "    " .. w, checked = s.warmth == w, fn = function() run("warmth", tostring(w)) end })
+  local function submenu(title, values, current, suffix, command)
+    local items = {}
+    for _, v in ipairs(values) do
+      table.insert(items, { title = v .. suffix, checked = current == v, fn = function() run(command, tostring(v)) end })
+    end
+    table.insert(menu, { title = title .. ": " .. tostring(current) .. suffix, menu = items })
   end
-  table.insert(menu, { title = "-" })
-  table.insert(menu, { title = "Brightness", disabled = true })
-  for _, b in ipairs(BRIGHTNESS) do
-    table.insert(menu, { title = "    " .. b .. "%", checked = s.brightness == b, fn = function() run("brightness", tostring(b)) end })
-  end
+  submenu("Warmth", WARMTH, s.warmth, "", "warmth")
+  submenu("Monitor brightness", BRIGHTNESS, s.brightness, "%", "brightness")
+  submenu("Laptop brightness", BRIGHTNESS, s.laptopBrightness or 100, "%", "laptop-brightness")
   return menu
 end
 
