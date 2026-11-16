@@ -76,6 +76,21 @@ local function report(msg, context)
     ops({"error", OPS_SERVICE, msg, (context and context ~= "" and (context .. "\n") or "") .. "log: " .. LOG_FILE})
 end
 
+-- A failure this file heals by itself is counted, not raised: the responder opens an incident only when
+-- its watch rate is crossed.
+local function occur(msg)
+    log("OCCURRENCE: " .. msg)
+    ops({"occurrence", OPS_SERVICE, msg})
+end
+
+-- macOS disables an event tap that stalls. Restarting it saves the key; a restart that does not take is an error.
+local function ensureTap(tap, name)
+    if tap:isEnabled() then return end
+    tap:start()
+    if tap:isEnabled() then occur(name .. " was disabled; restarted")
+    else report(name .. " was disabled and did not restart") end
+end
+
 local function applySubs(text)
     local f = io.open(SUBS_FILE, "r")
     if not f then return text end
@@ -849,10 +864,9 @@ local function keepAliveTick()
     if keepAliveCount % 12 == 0 then
         log(string.format("heartbeat (mode=%s)", tostring(mode)))
     end
-    -- macOS disables an event tap that stalls; the restart saves the key, but the stall is reported.
-    if not optTap:isEnabled() then report("optTap was disabled; restarted") optTap:start() end
-    if not keyTap:isEnabled() then report("keyTap was disabled; restarted") keyTap:start() end
-    if not ctrlTap:isEnabled() then report("ctrlTap was disabled; restarted") ctrlTap:start() end
+    ensureTap(optTap, "optTap")
+    ensureTap(keyTap, "keyTap")
+    ensureTap(ctrlTap, "ctrlTap")
     -- Liveness: if Hammerspoon dies, the beats stop and the responder notices.
     if keepAliveCount % 60 == 1 then ops({"beat", OPS_SERVICE, "300"}) end
     if mode == "transcribing" then
