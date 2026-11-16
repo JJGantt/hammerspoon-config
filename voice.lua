@@ -9,7 +9,9 @@
 -- Double-tap Control : record a command for the hub (the orchestrator), the same path as the watch's
 --                      Hub control: the clip goes to the hub's /api/voice-command, which transcribes it
 --                      and queues it as source `mac-cmd`. Tap Control again (or Enter) to send, Escape
---                      to cancel. The reply lands in the hub thread, not in a window here.
+--                      to cancel. The reply lands in the hub thread, not in a window here. While it
+--                      records it streams to the hub in acknowledged chunks, and stops itself loudly
+--                      the moment they are not acknowledged (see "A HUB COMMAND STREAMS" below).
 
 local SOX = "/opt/homebrew/bin/sox"
 local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
