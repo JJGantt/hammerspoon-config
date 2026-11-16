@@ -1,5 +1,5 @@
 -- Voice Transcription (simplified)
--- Double-tap Option : start recording
+-- Double-tap Option : start recording (only in a terminal while OPTION_TERMINAL_ONLY is true)
 -- Release Option    : stop + transcribe + paste + space
 -- Enter             : stop + transcribe + paste + send (Enter)
 -- Escape            : cancel
@@ -29,6 +29,15 @@ local STUCK_TIMEOUT = 120
 local TMUX = "/opt/homebrew/bin/tmux"
 local AI_TERMINAL_TAB_FILE = "/tmp/ai-terminal-active-tab"
 local AI_TERMINAL_BUNDLE = "com.github.Electron"
+-- Double-tap Option works only while a terminal is frontmost when true; everywhere when false.
+local OPTION_TERMINAL_ONLY = true
+local TERMINAL_BUNDLES = {
+    ["com.apple.Terminal"] = true,
+    ["com.googlecode.iterm2"] = true,
+    ["com.mitchellh.ghostty"] = true,
+    ["dev.warp.Warp-Stable"] = true,
+    [AI_TERMINAL_BUNDLE] = true,
+}
 local HUB_URL = "https://jared-status-hub.fly.dev"
 local HUB_ENV = os.getenv("HOME") .. "/repos/status-hub/.env"   -- HUB_TOKEN=
 
@@ -508,6 +517,10 @@ local optTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(
     local now = hs.timer.secondsSinceEpoch()
     if (now - lastOptUp) < DOUBLE_TAP then
         lastOptUp = 0
+        if OPTION_TERMINAL_ONLY then
+            local app = hs.application.frontmostApplication()
+            if not (app and TERMINAL_BUNDLES[app:bundleID() or ""]) then return false end
+        end
         safeTimer(0, function() startRecording() end)
     else
         lastOptUp = now
