@@ -5,6 +5,11 @@
 -- Escape            : cancel
 -- Adaptive: <15s local whisper, >=15s OpenAI Whisper API
 -- Cmd+Opt+V         : paste last transcription
+--
+-- Double-tap Control : record a command for the hub (the orchestrator), the same path as the watch's
+--                      Hub control: the clip goes to the hub's /api/voice-command, which transcribes it
+--                      and queues it as source `mac-cmd`. Tap Control again (or Enter) to send, Escape
+--                      to cancel. The reply lands in the hub thread, not in a window here.
 
 local SOX = "/opt/homebrew/bin/sox"
 local WHISPER = os.getenv("HOME") .. "/whisper.cpp/build/bin/whisper-cli"
@@ -24,6 +29,8 @@ local STUCK_TIMEOUT = 120
 local TMUX = "/opt/homebrew/bin/tmux"
 local AI_TERMINAL_TAB_FILE = "/tmp/ai-terminal-active-tab"
 local AI_TERMINAL_BUNDLE = "com.github.Electron"
+local HUB_URL = "https://jared-status-hub.fly.dev"
+local HUB_ENV = os.getenv("HOME") .. "/repos/status-hub/.env"   -- HUB_TOKEN=
 
 -- A recording ends only when you end it: Enter to send, Option-release to paste, Escape to cancel.
 -- Silence never stops it, however long the pause.
@@ -58,6 +65,8 @@ local sendAfter = false
 local targetWin = nil
 local targetAITab = nil  -- ai-terminal tab ID
 local targetPane = nil   -- tmux pane target
+local toHub = false      -- this recording goes to the hub (double-tap Control), not into a window
+local hubTask = nil
 local recordingStartedAt = 0
 
 local soxTask = nil
@@ -150,6 +159,8 @@ end
 local function reset()
     killSox()
     if whisperTask then whisperTask:terminate() whisperTask = nil end
+    if hubTask then hubTask:terminate() hubTask = nil end
+    toHub = false
     asyncPkill("whisper-cli.*hs-voice")
     targetWin = nil
     targetAITab = nil
@@ -163,15 +174,18 @@ local function ding(name)
     if s then s:play() end
 end
 
-local function startRecording()
-    log("startRecording")
+local function startRecording(forHub)
+    log("startRecording" .. (forHub and " (hub)" or ""))
     reset()
-    targetWin = hs.window.focusedWindow()
+    toHub = forHub == true
+    targetWin = not toHub and hs.window.focusedWindow() or nil
 
     -- Check if ai-terminal is focused
     local focusedApp = targetWin and targetWin:application()
     local focusedBundle = focusedApp and focusedApp:bundleID() or ""
-    if focusedBundle == AI_TERMINAL_BUNDLE then
+    if toHub then
+        -- no target: the command goes to the hub
+    elseif focusedBundle == AI_TERMINAL_BUNDLE then
         local f = io.open(AI_TERMINAL_TAB_FILE, "r")
         if f then
             targetAITab = f:read("*a"):match("^%s*(.-)%s*$")
@@ -186,7 +200,7 @@ local function startRecording()
     os.remove(WAV)
     recordingStartedAt = hs.timer.secondsSinceEpoch()
     setMode("recording")
-    ding("Glass")
+    ding(toHub and "Hero" or "Glass")
     soxTask = hs.task.new(SOX, function(code)
         if mode == "recording" then
             log("WARN: sox exited early (code=" .. tostring(code) .. ") — recording lost audio after this point")
@@ -200,7 +214,7 @@ local function saveRecording()
     hs.fs.mkdir(RECORDING_DIR)
     local dest = RECORDING_DIR .. "/" .. os.date("%Y-%m-%d_%H%M%S") .. ".wav"
     local _, ok = hs.execute(string.format("/bin/cp '%s' '%s'", WAV, dest))
-    if not ok then log("WARN: failed to copy recording") return end
+    if not ok then log("WARN: failed to copy recording") return nil end
     -- prune oldest beyond MAX_RECORDINGS
     local files = {}
     for f in hs.fs.dir(RECORDING_DIR) do
@@ -212,13 +226,77 @@ local function saveRecording()
         table.remove(files, 1)
     end
     log("saved recording: " .. dest .. " (" .. #files .. " kept)")
+    return dest
+end
+
+local function hubToken()
+    local f = io.open(HUB_ENV, "r")
+    if not f then return nil end
+    local tok
+    for line in f:lines() do
+        local v = line:match("^HUB_TOKEN=(.*)$")
+        if v then tok = v:match("^%s*(.-)%s*$") end
+    end
+    f:close()
+    return tok
+end
+
+-- Upload the clip to the hub as a pressed command. The hub transcribes it (Groq Whisper) and queues
+-- it on voice_requests; the worker answers it in the hub thread like any watch command. The token goes
+-- to curl on stdin (-K -), never in argv.
+local function sendToHub(clip, secs)
+    local token = hubToken()
+    if not token or token == "" then
+        log("ERROR: hub send: no HUB_TOKEN in " .. HUB_ENV)
+        setMode(nil)
+        hs.alert.show("Hub: no token")
+        return
+    end
+    local url = string.format("%s/api/voice-command?source=mac-cmd&dur=%.1f&client_msg_id=%s",
+        HUB_URL, secs, hs.host.uuid())
+    hubTask = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+        local ok, err = pcall(function()
+            hubTask = nil
+            setMode(nil)
+            local res = stdout and stdout ~= "" and hs.json.decode(stdout) or nil
+            if code ~= 0 or not res then
+                log(string.format("ERROR: hub send failed (curl %s): %s %s", tostring(code),
+                    (stdout or ""):sub(1, 200), (stderr or ""):sub(1, 200)))
+                hs.alert.show("Hub: send failed (clip kept)")
+                return
+            end
+            if res.enqueued then
+                log("hub: queued " .. tostring(res.id) .. ": " .. tostring(res.transcript or ""):sub(1, 80))
+                hs.alert.show("→ Hub: " .. ((res.transcript and res.transcript ~= "") and res.transcript or "sent"))
+            else
+                log("hub: not queued: " .. (stdout or ""):sub(1, 200))
+                hs.alert.show(res.capture == "damaged" and "Hub: recording damaged" or "No speech detected")
+            end
+        end)
+        if not ok then
+            log("ERROR in hub callback: " .. tostring(err))
+            setMode(nil)
+            hs.alert.show("Voice error")
+        end
+    end, {"-sS", "--fail-with-body", "--max-time", "110", "-X", "POST",
+          "-H", "Content-Type: audio/wav", "--data-binary", "@" .. clip, "-K", "-"})
+    hubTask:start()
+    hubTask:setInput(string.format('url = "%s"\nheader = "X-Hub-Token: %s"\n', url, token))
+    hubTask:closeInput()
 end
 
 function stopAndTranscribe()  -- assigns to the forward-declared local above
     log("stopAndTranscribe (sendAfter=" .. tostring(sendAfter) .. ")")
     killSox()
-    saveRecording()
+    local saved = saveRecording()
     local recordingSecs = hs.timer.secondsSinceEpoch() - recordingStartedAt
+    if toHub then
+        setMode("transcribing")
+        ding("Purr")
+        -- the saved copy, so a new recording overwriting WAV cannot cut the upload short
+        safeTimer(0.15, function() sendToHub(saved or WAV, recordingSecs) end)
+        return
+    end
     local useAPI = recordingSecs >= ADAPTIVE_THRESHOLD
     log(string.format("duration=%.1fs using %s", recordingSecs, useAPI and "API" or "local"))
     setMode("transcribing")
@@ -439,8 +517,49 @@ end)
 optTap:start()
 
 -- Key watcher (Enter to send, Escape to cancel)
+-- Control watcher (double-tap to record for the hub, tap again to send). A Control that was part of a
+-- chord (Ctrl-C, Ctrl-R, ...) never counts as a tap, so Ctrl-C twice in a terminal does not start one.
+local lastCtrlUp = 0
+local ctrlChord = false
+local ctrlTap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
+    local kc = event:getKeyCode()
+    if kc ~= 59 and kc ~= 62 then return false end
+    local flags = event:getFlags()
+    if flags.ctrl then
+        ctrlChord = (flags.cmd or flags.alt or flags.shift) and true or false
+        return false
+    end
+    -- Control released
+    if ctrlChord or flags.cmd or flags.alt or flags.shift then
+        ctrlChord = false
+        lastCtrlUp = 0
+        return false
+    end
+    if mode == "recording" and toHub then
+        local elapsed = hs.timer.secondsSinceEpoch() - recordingStartedAt
+        if elapsed < MIN_RECORD_SECS then return false end
+        safeTimer(0, function()
+            log("ctrl-tap: sending to hub")
+            stopAndTranscribe()
+        end)
+        lastCtrlUp = 0
+        return false
+    end
+    if mode ~= nil then return false end
+    local now = hs.timer.secondsSinceEpoch()
+    if (now - lastCtrlUp) < DOUBLE_TAP then
+        lastCtrlUp = 0
+        safeTimer(0, function() startRecording(true) end)
+    else
+        lastCtrlUp = now
+    end
+    return false
+end)
+ctrlTap:start()
+
 local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
     local kc = event:getKeyCode()
+    if event:getFlags().ctrl then ctrlChord = true lastCtrlUp = 0 end
 
     -- Escape: cancel
     if kc == 53 and mode ~= nil then
@@ -479,6 +598,7 @@ local function keepAliveTick()
     end
     if not optTap:isEnabled() then log("WARN: optTap disabled — restarting") optTap:start() end
     if not keyTap:isEnabled() then log("WARN: keyTap disabled — restarting") keyTap:start() end
+    if not ctrlTap:isEnabled() then log("WARN: ctrlTap disabled — restarting") ctrlTap:start() end
     if mode == "transcribing" then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
@@ -498,6 +618,7 @@ local wakeWatcher = hs.caffeinate.watcher.new(function(event)
         hs.timer.doAfter(1, function()
             if not optTap:isEnabled() then optTap:start() end
             if not keyTap:isEnabled() then keyTap:start() end
+            if not ctrlTap:isEnabled() then ctrlTap:start() end
             reset()
         end)
     end
