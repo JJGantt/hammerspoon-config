@@ -39,6 +39,9 @@ local TERMINAL_BUNDLES = {
     [AI_TERMINAL_BUNDLE] = true,
 }
 local HUB_URL = "https://jared-status-hub.fly.dev"
+local FALLBACK_URL = "https://felyggqjjhltwokdfhop.supabase.co/functions/v1/voice-fallback"
+local OPS = os.getenv("HOME") .. "/repos/health/responder/bin/ops"
+local OPS_SERVICE = "hammerspoon-voice"
 local HUB_ENV = os.getenv("HOME") .. "/repos/status-hub/.env"   -- HUB_TOKEN=
 
 -- A recording ends only when you end it: Enter to send, Option-release to paste, Escape to cancel.
@@ -52,6 +55,23 @@ local function log(msg)
     hslog.i(line)
     local f = io.open(LOG_FILE, "a")
     if f then f:write(line .. "\n") f:close() end
+end
+
+-- A failure goes to the ops responder (health/responder), which opens an incident and investigates.
+local opsTasks = {}
+local function ops(args)
+    local t
+    t = hs.task.new(OPS, function(code, out, err)
+        opsTasks[t] = nil
+        if code ~= 0 then log("WARN: ops " .. args[1] .. " not delivered: " .. ((err ~= "" and err) or out or ""):sub(1, 200)) end
+    end, args)
+    opsTasks[t] = true
+    t:start()
+end
+
+local function report(msg, context)
+    log("ERROR: " .. msg .. (context and context ~= "" and (" | " .. context) or ""))
+    ops({"error", OPS_SERVICE, msg, (context and context ~= "" and (context .. "\n") or "") .. "log: " .. LOG_FILE})
 end
 
 local function applySubs(text)
@@ -75,7 +95,7 @@ local targetWin = nil
 local targetAITab = nil  -- ai-terminal tab ID
 local targetPane = nil   -- tmux pane target
 local toHub = false      -- this recording goes to the hub (double-tap Control), not into a window
-local hubTask = nil
+local hubTasks = {}      -- in-flight curl tasks, held so the GC cannot collect them
 local recordingStartedAt = 0
 
 local soxTask = nil
@@ -168,7 +188,8 @@ end
 local function reset()
     killSox()
     if whisperTask then whisperTask:terminate() whisperTask = nil end
-    if hubTask then hubTask:terminate() hubTask = nil end
+    for t in pairs(hubTasks) do t:terminate() end
+    hubTasks = {}
     toHub = false
     asyncPkill("whisper-cli.*hs-voice")
     targetWin = nil
@@ -212,7 +233,7 @@ local function startRecording(forHub)
     ding(toHub and "Hero" or "Glass")
     soxTask = hs.task.new(SOX, function(code)
         if mode == "recording" then
-            log("WARN: sox exited early (code=" .. tostring(code) .. ") — recording lost audio after this point")
+            report("sox exited mid-recording; audio after this point is lost", "code " .. tostring(code))
             hs.alert.show("⚠️ Recording device dropped")
         end
     end, soxArgs())
@@ -223,7 +244,7 @@ local function saveRecording()
     hs.fs.mkdir(RECORDING_DIR)
     local dest = RECORDING_DIR .. "/" .. os.date("%Y-%m-%d_%H%M%S") .. ".wav"
     local _, ok = hs.execute(string.format("/bin/cp '%s' '%s'", WAV, dest))
-    if not ok then log("WARN: failed to copy recording") return nil end
+    if not ok then report("could not save recording", WAV .. " -> " .. dest) return nil end
     -- prune oldest beyond MAX_RECORDINGS
     local files = {}
     for f in hs.fs.dir(RECORDING_DIR) do
@@ -250,48 +271,93 @@ local function hubToken()
     return tok
 end
 
--- Upload the clip to the hub as a pressed command. The hub transcribes it (Groq Whisper) and queues
--- it on voice_requests; the worker answers it in the hub thread like any watch command. The token goes
--- to curl on stdin (-K -), never in argv.
-local function sendToHub(clip, secs)
+-- curl reads the token from a config file (mkstemp: 0600) rather than argv, so `ps` never shows it.
+local function curlConfig(url, token)
+    local path = os.tmpname()
+    local f = io.open(path, "w")
+    if not f then return nil end
+    f:write(string.format('url = "%s"\nheader = "X-Hub-Token: %s"\n', url, token))
+    f:close()
+    return path
+end
+
+-- Run curl; done(httpCode, body, curlExit, stderr). The status rides the last line of stdout (-w).
+local function curlPost(url, token, clip, contentType, maxTime, done)
+    local cfg = curlConfig(url, token)
+    if not cfg then return done(0, "", -1, "could not write curl config") end
+    local t
+    t = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+        os.remove(cfg)
+        hubTasks[t] = nil
+        local body, status = (stdout or ""):match("^(.*)\n(%d%d%d)$")
+        done(tonumber(status) or 0, body or stdout or "", code, stderr or "")
+    end, {"-sS", "--max-time", tostring(maxTime), "-X", "POST", "-H", "Content-Type: " .. contentType,
+          "--data-binary", "@" .. clip, "-w", "\n%{http_code}", "-K", cfg})
+    hubTasks[t] = true
+    t:start()
+end
+
+-- The hub did not answer, as against answering with a refusal: no route, no connection, a timeout, or
+-- Fly's proxy answering 5xx for a machine it does not have. Same rule as the watch (Hub.swift unreachable).
+local function hubUnreachable(status, curlExit)
+    return curlExit ~= 0 or status >= 500 or status == 0
+end
+
+-- Send a recorded command the way the watch's Hub control does: to the hub's /api/voice-command, which
+-- transcribes it and queues it (source `mac-cmd`). When the hub cannot be reached, the same clip goes to
+-- Supabase's voice-fallback function (data-layer supabase/functions/voice-fallback), the watch's route
+-- around a hub outage. Every failure is reported to the ops responder; the clip stays in RECORDING_DIR.
+local function sendToHub(wav, secs)
+    local function finish(alert) setMode(nil) hs.alert.show(alert) end
     local token = hubToken()
     if not token or token == "" then
-        log("ERROR: hub send: no HUB_TOKEN in " .. HUB_ENV)
-        setMode(nil)
-        hs.alert.show("Hub: no token")
-        return
+        report("hub command not sent: no HUB_TOKEN", HUB_ENV .. "; clip kept at " .. wav)
+        return finish("Hub: no token (clip kept)")
     end
-    local url = string.format("%s/api/voice-command?source=mac-cmd&dur=%.1f&client_msg_id=%s",
-        HUB_URL, secs, hs.host.uuid())
-    hubTask = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
-        local ok, err = pcall(function()
-            hubTask = nil
-            setMode(nil)
-            local res = stdout and stdout ~= "" and hs.json.decode(stdout) or nil
-            if code ~= 0 or not res then
-                log(string.format("ERROR: hub send failed (curl %s): %s %s", tostring(code),
-                    (stdout or ""):sub(1, 200), (stderr or ""):sub(1, 200)))
-                hs.alert.show("Hub: send failed (clip kept)")
-                return
+    -- AAC is a tenth of the WAV, and the fallback names its upload .m4a for Groq.
+    local clip, ctype = wav:gsub("%.wav$", ".m4a"), "audio/mp4"
+    local _, conv = hs.execute(string.format("/usr/bin/afconvert -f m4af -d aac '%s' '%s'", wav, clip))
+    if not conv then
+        report("hub command: afconvert to m4a failed, sending WAV", wav)
+        clip, ctype = wav, "audio/wav"
+    end
+    local msgId = hs.host.uuid():lower()
+    local q = string.format("client_msg_id=%s&dur=%.1f&client_now=%s", msgId, secs, os.date("%Y-%m-%dT%H:%M:%S"))
+
+    local function viaFallback(why)
+        curlPost(FALLBACK_URL .. "?" .. q, token, clip, ctype, 60, function(status, body, curlExit, stderr)
+            local res = status == 200 and hs.json.decode(body) or nil
+            if res and res.id then
+                report("hub unreachable; command sent through voice-fallback", why .. "; request " .. res.id)
+                return finish("→ Hub (fallback): " .. ((res.transcript and res.transcript ~= "") and res.transcript or "sent"))
             end
-            if res.enqueued then
-                log("hub: queued " .. tostring(res.id) .. ": " .. tostring(res.transcript or ""):sub(1, 80))
-                hs.alert.show("→ Hub: " .. ((res.transcript and res.transcript ~= "") and res.transcript or "sent"))
-            else
-                log("hub: not queued: " .. (stdout or ""):sub(1, 200))
-                hs.alert.show(res.capture == "damaged" and "Hub: recording damaged" or "No speech detected")
-            end
+            report("hub command lost: hub and voice-fallback both failed",
+                string.format("hub: %s; fallback: http %d curl %d %s %s; clip kept at %s",
+                    why, status, curlExit, body:sub(1, 200), stderr:sub(1, 200), wav))
+            finish("Hub: send failed (clip kept)")
         end)
-        if not ok then
-            log("ERROR in hub callback: " .. tostring(err))
-            setMode(nil)
-            hs.alert.show("Voice error")
+    end
+
+    curlPost(HUB_URL .. "/api/voice-command?source=mac-cmd&" .. q, token, clip, ctype, 25, function(status, body, curlExit, stderr)
+        if hubUnreachable(status, curlExit) then
+            return viaFallback(string.format("http %d curl %d %s", status, curlExit, (stderr ~= "" and stderr or body):sub(1, 200)))
         end
-    end, {"-sS", "--fail-with-body", "--max-time", "110", "-X", "POST",
-          "-H", "Content-Type: audio/wav", "--data-binary", "@" .. clip, "-K", "-"})
-    hubTask:start()
-    hubTask:setInput(string.format('url = "%s"\nheader = "X-Hub-Token: %s"\n', url, token))
-    hubTask:closeInput()
+        local res = hs.json.decode(body)
+        if status ~= 200 or not res then
+            report("hub refused a command", string.format("http %d: %s; clip kept at %s", status, body:sub(1, 300), wav))
+            return finish("Hub: refused (clip kept)")
+        end
+        if res.enqueued then
+            log("hub: queued " .. tostring(res.id) .. ": " .. tostring(res.transcript or ""):sub(1, 80))
+            return finish("→ Hub: " .. ((res.transcript and res.transcript ~= "") and res.transcript or "sent"))
+        end
+        log("hub: not queued: " .. body:sub(1, 200))
+        if res.capture == "damaged" then
+            report("hub judged a Mac recording damaged", body:sub(1, 200) .. "; clip kept at " .. wav)
+            return finish("Hub: recording damaged")
+        end
+        finish("No speech detected")
+    end)
 end
 
 function stopAndTranscribe()  -- assigns to the forward-declared local above
@@ -398,7 +464,7 @@ function stopAndTranscribe()  -- assigns to the forward-declared local above
             local ok, err = pcall(function()
                 whisperTask = nil
                 if code ~= 0 then
-                    log("WARN: whisper failed (code " .. tostring(code) .. ")")
+                    report("whisper failed", "code " .. tostring(code) .. " " .. (stderr or ""):sub(1, 200))
                     setMode(nil)
                     hs.alert.show("Transcription failed")
                     return
@@ -415,7 +481,7 @@ function stopAndTranscribe()  -- assigns to the forward-declared local above
                 deliver(text)
             end)
             if not ok then
-                log("ERROR in whisper callback: " .. tostring(err))
+                report("whisper callback error", tostring(err))
                 setMode(nil)
                 hs.alert.show("Voice error")
             end
@@ -478,7 +544,7 @@ function stopAndTranscribe()  -- assigns to the forward-declared local above
                     deliver(apiText)
                 end)
                 if not ok then
-                    log("ERROR in API callback: " .. tostring(err))
+                    report("transcription API callback error", tostring(err))
                     runLocalWhisper(WHISPER_MODEL_MEDIUM)
                 end
             end, {"-c", curlCmd})
@@ -609,13 +675,16 @@ local function keepAliveTick()
     if keepAliveCount % 12 == 0 then
         log(string.format("heartbeat (mode=%s)", tostring(mode)))
     end
-    if not optTap:isEnabled() then log("WARN: optTap disabled — restarting") optTap:start() end
-    if not keyTap:isEnabled() then log("WARN: keyTap disabled — restarting") keyTap:start() end
-    if not ctrlTap:isEnabled() then log("WARN: ctrlTap disabled — restarting") ctrlTap:start() end
+    -- macOS disables an event tap that stalls; the restart saves the key, but the stall is reported.
+    if not optTap:isEnabled() then report("optTap was disabled; restarted") optTap:start() end
+    if not keyTap:isEnabled() then report("keyTap was disabled; restarted") keyTap:start() end
+    if not ctrlTap:isEnabled() then report("ctrlTap was disabled; restarted") ctrlTap:start() end
+    -- Liveness: if Hammerspoon dies, the beats stop and the responder notices.
+    if keepAliveCount % 60 == 1 then ops({"beat", OPS_SERVICE, "300"}) end
     if mode == "transcribing" then
         local elapsed = hs.timer.secondsSinceEpoch() - modeChangedAt
         if elapsed > STUCK_TIMEOUT then
-            log(string.format("WARN: stuck for %.0fs — resetting", elapsed))
+            report(string.format("voice stuck in %s for %.0fs; reset", mode, elapsed))
             hs.alert.show("Voice: recovered from stuck state")
             reset()
         end
