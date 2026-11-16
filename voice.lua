@@ -117,6 +117,7 @@ local whisperTask = nil
 local activeTimers = {}
 local stopAndTranscribe  -- forward declaration: assigned further down, so the local exists for
                          -- callers above it (Lua locals aren't visible before declaration)
+local streamStart, streamAbandon  -- forward declarations: the hub command's stream, further down
 
 local function safeTimer(delay, fn)
     local t = hs.timer.doAfter(delay, function() fn() end)
@@ -186,6 +187,7 @@ local function getTmuxPane(tty)
 end
 
 local function reset()
+    streamAbandon()
     killSox()
     if whisperTask then whisperTask:terminate() whisperTask = nil end
     for t in pairs(hubTasks) do t:terminate() end
@@ -231,6 +233,7 @@ local function startRecording(forHub)
     recordingStartedAt = hs.timer.secondsSinceEpoch()
     setMode("recording")
     ding(toHub and "Hero" or "Glass")
+    if toHub then streamStart() end
     soxTask = hs.task.new(SOX, function(code)
         if mode == "recording" then
             report("sox exited mid-recording; audio after this point is lost", "code " .. tostring(code))
@@ -282,18 +285,20 @@ local function curlConfig(url, token)
 end
 
 -- Run curl; done(httpCode, body, curlExit, stderr). The status rides the last line of stdout (-w).
-local function curlPost(url, token, clip, contentType, maxTime, done)
+-- `tasks` is the set that holds the task (hubTasks unless given), which is the set reset() kills.
+local function curlPost(url, token, clip, contentType, maxTime, done, tasks)
+    tasks = tasks or hubTasks
     local cfg = curlConfig(url, token)
     if not cfg then return done(0, "", -1, "could not write curl config") end
     local t
     t = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
         os.remove(cfg)
-        hubTasks[t] = nil
+        tasks[t] = nil
         local body, status = (stdout or ""):match("^(.*)\n(%d%d%d)$")
         done(tonumber(status) or 0, body or stdout or "", code, stderr or "")
     end, {"-sS", "--max-time", tostring(maxTime), "-X", "POST", "-H", "Content-Type: " .. contentType,
           "--data-binary", "@" .. clip, "-w", "\n%{http_code}", "-K", cfg})
-    hubTasks[t] = true
+    tasks[t] = true
     t:start()
 end
 
@@ -303,11 +308,173 @@ local function hubUnreachable(status, curlExit)
     return curlExit ~= 0 or status >= 500 or status == 0
 end
 
+-- ---- A HUB COMMAND STREAMS TO THE HUB WHILE IT RECORDS ------------------------------------------------
+-- The hub side is status-hub routes/voice.js /api/voice-chunk (docs/VOICE-ON-THE-PHONE.md § Every
+-- pressed recording streams to the hub). What sox has written is posted about once a second, one request
+-- in flight, in order, and each answer is that chunk's acknowledgement. NOTHING ACKNOWLEDGED FOR
+-- CHUNK_ACK_S, or an answer saying the capture is damaged, means the audio is not reaching the hub: the
+-- recording stops right then, everything recorded goes up exactly as a normal stop sends it (sendToHub,
+-- with its voice-fallback), and it is loud and reported. That one deadline also catches sox going quiet,
+-- since a chunk is only cut when sox has written something.
+-- The upload names the stream (`streams=` on /api/voice-command) so the hub marks it used. A stream left
+-- without that — Hammerspoon dies, the Mac sleeps mid-recording — is recovered by the hub after a minute
+-- of silence and acted on, so the command survives even then.
+-- Chunks are cut on sox's own writes to the file (hs.pathwatcher, which FSEvents coalesces to about
+-- every 0.4s), never on a timer asking whether the file grew. Every chunk's bytes are kept until the
+-- stream ends, because a 409 asks for a resend from `next` and a 410 (the hub restarted) from seq 0.
+local CHUNK_EVERY = 1.0   -- seconds between chunks, at most: a write event sooner than this cuts nothing
+local CHUNK_ACK_S = 6     -- longest a recording may go with nothing acknowledged
+local stream = nil        -- the stream of the hub command recording now, until it ends
+local liveStreams = {}    -- every stream still delivering, held so the GC cannot collect its timers
+local streamTasks = {}    -- its curl tasks; reset() leaves these alone, so an end or cancel still goes
+local streamPump          -- forward declaration
+
+local function streamDone(s)
+    if s.watcher then s.watcher:stop() s.watcher = nil end
+    if s.deadline then s.deadline:stop() s.deadline = nil end
+    if s.retry then s.retry:stop() s.retry = nil end
+    liveStreams[s] = nil
+end
+
+-- The bytes sox has written past what this stream already holds.
+local function streamRead(s, path)
+    local f = io.open(path, "rb")
+    if not f then return "" end
+    f:seek("set", s.read)
+    local b = f:read("*a") or ""
+    f:close()
+    s.read = s.read + #b
+    return b
+end
+
+-- The audio is not reaching the hub: stop now and send what was recorded, loudly.
+local function streamBroken(s, why, label)
+    if s ~= stream or s.closed or mode ~= "recording" or not toHub then return end
+    ding("Basso")
+    hs.alert.show(label, 4)
+    report("hub command stream broken; recording stopped and sent", string.format("%s; stream %s, %d of %d chunks acknowledged",
+        why, s.id, s.next, #s.chunks))
+    stopAndTranscribe()
+end
+
+local function armDeadline(s)
+    if s.deadline then s.deadline:stop() end
+    s.deadline = hs.timer.doAfter(CHUNK_ACK_S, function()
+        streamBroken(s, string.format("nothing acknowledged for %ds (last: %s)", CHUNK_ACK_S, s.lastErr or "no answer yet"),
+            "⚠️ Hub stream lost")
+    end)
+end
+
+function streamPump(s)  -- assigns to the forward-declared local above
+    if s.inflight or s.abandoned then return end
+    local c = s.chunks[s.next + 1]
+    if not c then
+        if s.closed then   -- the final chunk is acknowledged
+            log(string.format("hub stream %s: delivered %d chunks; the hub holds %.1fs", s.id, #s.chunks, s.held or 0))
+            streamDone(s)
+        end
+        return
+    end
+    if not s.token then
+        s.lastErr = "no HUB_TOKEN in " .. HUB_ENV
+        if s.closed then streamDone(s) end
+        return
+    end
+    local tmp = os.tmpname()
+    local f = io.open(tmp, "wb")
+    if not f then s.lastErr = "could not write chunk file" return end
+    f:write(c.bytes)
+    f:close()
+    local seq = s.next
+    local url = string.format("%s/api/voice-chunk?id=%s&seq=%d&type=wav&secs=%.1f&state=%s&source=mac-cmd",
+        HUB_URL, s.id, seq, c.secs, c.state)
+    s.inflight = true
+    curlPost(url, s.token, tmp, "application/octet-stream", CHUNK_ACK_S, function(status, body, curlExit, stderr)
+        os.remove(tmp)
+        s.inflight = false
+        if s.abandoned then return end
+        local ok, res = pcall(hs.json.decode, body)
+        if not ok or type(res) ~= "table" then res = nil end
+        if status == 200 and res and res.next then
+            s.next = res.next
+            s.failures = 0
+            s.held = tonumber(res.held_s)
+            if res.damaged then
+                return streamBroken(s, string.format("hub says the capture is damaged: holds %.1fs of %.1fs",
+                    tonumber(res.held_s) or 0, tonumber(res.secs) or 0), "⚠️ Recording damaged")
+            end
+            if not s.closed then armDeadline(s) end
+            return streamPump(s)
+        elseif status == 409 and res and res.next then
+            s.next = res.next
+            return streamPump(s)
+        elseif status == 410 then
+            log("hub stream " .. s.id .. ": hub lost it (410); resending from seq 0")
+            s.next = 0
+            return streamPump(s)
+        end
+        s.failures = s.failures + 1
+        s.lastErr = string.format("chunk %d: http %d curl %d %s", seq, status, curlExit, (stderr ~= "" and stderr or body):sub(1, 200))
+        log("WARN: hub stream " .. s.id .. ": " .. s.lastErr)
+        if s.closed and s.failures >= 3 then
+            -- the upload carries the whole clip and names this stream; it stands in for the missing end
+            log("WARN: hub stream " .. s.id .. ": final chunk not delivered; the upload stands in for it")
+            return streamDone(s)
+        end
+        s.retry = hs.timer.doAfter(1, function() s.retry = nil streamPump(s) end)
+    end, streamTasks)
+end
+
+function streamStart()  -- assigns to the forward-declared local
+    local s = {id = hs.host.uuid():lower(), token = hubToken(), chunks = {}, next = 0, read = 0,
+               lastCut = hs.timer.secondsSinceEpoch(), failures = 0}
+    stream = s
+    liveStreams[s] = true
+    s.watcher = hs.pathwatcher.new(WAV, function()
+        if s.closed then return end
+        local now = hs.timer.secondsSinceEpoch()
+        if now - s.lastCut < CHUNK_EVERY then return end
+        local b = streamRead(s, WAV)
+        if #b == 0 then return end
+        s.lastCut = now
+        s.chunks[#s.chunks + 1] = {bytes = b, state = "rec", secs = now - recordingStartedAt}
+        streamPump(s)
+    end):start()
+    armDeadline(s)
+    log("hub stream " .. s.id .. " started")
+end
+
+-- Close the open stream with its last chunk (state `end` carrying the rest of `path`, or `cancel`).
+-- Best effort: answers the stream id for the upload to name, nil when there was none.
+local function streamClose(state, path, secs)
+    local s = stream
+    if not s or s.closed then return nil end
+    stream = nil
+    s.closed = true
+    if s.watcher then s.watcher:stop() s.watcher = nil end
+    if s.deadline then s.deadline:stop() s.deadline = nil end
+    s.chunks[#s.chunks + 1] = {bytes = path and streamRead(s, path) or "", state = state, secs = secs}
+    log(string.format("hub stream %s: %s after %d chunks", s.id, state, #s.chunks))
+    streamPump(s)
+    return s.id
+end
+
+-- reset() mid-recording (the Mac woke from sleep): the recording is gone here, so the stream is left as it
+-- is, and the hub recovers what reached it.
+function streamAbandon()  -- assigns to the forward-declared local
+    local s = stream
+    if not s or s.closed then return end
+    stream = nil
+    s.abandoned = true
+    streamDone(s)
+    log("hub stream " .. s.id .. " abandoned mid-recording; the hub recovers what reached it")
+end
+
 -- Send a recorded command the way the watch's Hub control does: to the hub's /api/voice-command, which
 -- transcribes it and queues it (source `mac-cmd`). When the hub cannot be reached, the same clip goes to
 -- Supabase's voice-fallback function (data-layer supabase/functions/voice-fallback), the watch's route
 -- around a hub outage. Every failure is reported to the ops responder; the clip stays in RECORDING_DIR.
-local function sendToHub(wav, secs)
+local function sendToHub(wav, secs, streamId)
     local function finish(alert) setMode(nil) hs.alert.show(alert) end
     local token = hubToken()
     if not token or token == "" then
@@ -338,7 +505,8 @@ local function sendToHub(wav, secs)
         end)
     end
 
-    curlPost(HUB_URL .. "/api/voice-command?source=mac-cmd&" .. q, token, clip, ctype, 25, function(status, body, curlExit, stderr)
+    local streams = streamId and ("&streams=" .. streamId) or ""
+    curlPost(HUB_URL .. "/api/voice-command?source=mac-cmd&" .. q .. streams, token, clip, ctype, 25, function(status, body, curlExit, stderr)
         if hubUnreachable(status, curlExit) then
             return viaFallback(string.format("http %d curl %d %s", status, curlExit, (stderr ~= "" and stderr or body):sub(1, 200)))
         end
@@ -369,7 +537,8 @@ function stopAndTranscribe()  -- assigns to the forward-declared local above
         setMode("transcribing")
         ding("Purr")
         -- the saved copy, so a new recording overwriting WAV cannot cut the upload short
-        safeTimer(0.15, function() sendToHub(saved or WAV, recordingSecs) end)
+        local streamId = streamClose("end", saved or WAV, recordingSecs)
+        safeTimer(0.15, function() sendToHub(saved or WAV, recordingSecs, streamId) end)
         return
     end
     local useAPI = recordingSecs >= ADAPTIVE_THRESHOLD
@@ -644,6 +813,9 @@ local keyTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event
     if kc == 53 and mode ~= nil then
         safeTimer(0, function()
             log("escape: cancelling")
+            if mode == "recording" and toHub then
+                streamClose("cancel", nil, hs.timer.secondsSinceEpoch() - recordingStartedAt)
+            end
             reset()
             hs.alert.show("Cancelled")
         end)
